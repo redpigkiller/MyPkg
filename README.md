@@ -48,6 +48,26 @@ y = x + 10                     # → val=127 (auto-saturate!)
 
 ---
 
+## Scheduler
+
+### [Scheduler](mypkg/scheduler/scheduler_README.md) — Job Scheduling
+
+跨平台任務排程器，支援 priority / dependency / 即時 stdout streaming。
+
+```python
+sched = Scheduler(resources={"local": 4}, log_dir="./logs")
+
+compile_job = CmdJob("compile", cmd="vlogan -sverilog top.sv")
+sim_job = CmdJob("sim_01", cmd="vcs -R +tc=01",
+                 depends_on=[compile_job], priority=10)
+
+sched.submit(compile_job, sim_job)
+sched.run()
+sched.summary()
+```
+
+---
+
 ## License
 
 MIT
