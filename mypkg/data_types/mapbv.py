@@ -2,10 +2,10 @@
 PyBitVector (PBV) — A lightweight BitVector library for IC design & verification.
 
 Classes:
-    BV            — The main BitVector node (named variable or constant).
-    BVSlice       — A lightweight proxy returned by BV[high:low].
-    BVExpr        — A logic expression node produced by &, |, ^, ~ operators.
-    StructSegment — A data object returned by BV.structure for introspection.
+    MapBV            — The main BitVector node (named variable or constant).
+    MapBVSlice       — A lightweight proxy returned by MapBV[high:low].
+    MapBVExpr        — A logic expression node produced by &, |, ^, ~ operators.
+    StructSegment — A data object returned by MapBV.structure for introspection.
 """
 
 from __future__ import annotations
@@ -16,28 +16,28 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, Union
 
 # Type alias for anything that carries a .value / .width
-_Operand = Union["BV", "BVSlice", "BVExpr", int]
+_Operand = Union["MapBV", "MapBVSlice", "MapBVExpr", int]
 
 
 # ---------------------------------------------------------------------------
-# StructSegment  — returned by BV.structure
+# StructSegment  — returned by MapBV.structure
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class StructSegment:
-    """Describes one piece of a linked BV's composition.
+    """Describes one piece of a linked MapBV's composition.
 
     Attributes:
-        bv:          The source BV object.
+        bv:          The source MapBV object.
         slice_range: (high, low) tuple if this segment is a slice,
-                     or None if the full BV is used.
+                     or None if the full MapBV is used.
     """
-    bv: "BV"
+    bv: "MapBV"
     slice_range: Optional[Tuple[int, int]]
 
 
 # ---------------------------------------------------------------------------
-# _LogicOpsMixin  — shared logic for BV, BVSlice, BVExpr
+# _LogicOpsMixin  — shared logic for MapBV, MapBVSlice, MapBVExpr
 # ---------------------------------------------------------------------------
 
 class _LogicOpsMixin:
@@ -45,46 +45,46 @@ class _LogicOpsMixin:
 
     # Subclasses must provide .width (int)
 
-    def __and__(self, other: _Operand) -> "BVExpr":
+    def __and__(self, other: _Operand) -> "MapBVExpr":
         w = self.width if isinstance(other, int) else max(self.width, other.width)
-        return BVExpr("&", [self, other], w)
+        return MapBVExpr("&", [self, other], w)
 
-    def __rand__(self, other: int) -> "BVExpr":
-        return BVExpr("&", [other, self], self.width)
+    def __rand__(self, other: int) -> "MapBVExpr":
+        return MapBVExpr("&", [other, self], self.width)
 
-    def __or__(self, other: _Operand) -> "BVExpr":
+    def __or__(self, other: _Operand) -> "MapBVExpr":
         w = self.width if isinstance(other, int) else max(self.width, other.width)
-        return BVExpr("|", [self, other], w)
+        return MapBVExpr("|", [self, other], w)
 
-    def __ror__(self, other: int) -> "BVExpr":
-        return BVExpr("|", [other, self], self.width)
+    def __ror__(self, other: int) -> "MapBVExpr":
+        return MapBVExpr("|", [other, self], self.width)
 
-    def __xor__(self, other: _Operand) -> "BVExpr":
+    def __xor__(self, other: _Operand) -> "MapBVExpr":
         w = self.width if isinstance(other, int) else max(self.width, other.width)
-        return BVExpr("^", [self, other], w)
+        return MapBVExpr("^", [self, other], w)
 
-    def __rxor__(self, other: int) -> "BVExpr":
-        return BVExpr("^", [other, self], self.width)
+    def __rxor__(self, other: int) -> "MapBVExpr":
+        return MapBVExpr("^", [other, self], self.width)
 
-    def __invert__(self) -> "BVExpr":
-        return BVExpr("~", [self], self.width)
+    def __invert__(self) -> "MapBVExpr":
+        return MapBVExpr("~", [self], self.width)
 
-    def __lshift__(self, n: int) -> "BVExpr":
+    def __lshift__(self, n: int) -> "MapBVExpr":
         if not isinstance(n, int):
             return NotImplemented
-        return BVExpr("<<", [self, n], self.width)
+        return MapBVExpr("<<", [self, n], self.width)
 
-    def __rshift__(self, n: int) -> "BVExpr":
+    def __rshift__(self, n: int) -> "MapBVExpr":
         if not isinstance(n, int):
             return NotImplemented
-        return BVExpr(">>", [self, n], self.width)
+        return MapBVExpr(">>", [self, n], self.width)
 
 
 # ---------------------------------------------------------------------------
-# BVSlice  — proxy returned by BV.__getitem__
+# MapBVSlice  — proxy returned by MapBV.__getitem__
 # ---------------------------------------------------------------------------
 
-class BVSlice(_LogicOpsMixin):
+class MapBVSlice(_LogicOpsMixin):
     """Lightweight proxy representing ``parent[high:low]``.
 
     The slice uses *inclusive* bounds on both ends, matching the hardware
@@ -93,17 +93,17 @@ class BVSlice(_LogicOpsMixin):
 
     __slots__ = ("_parent", "_high", "_low")
 
-    def __init__(self, parent: "BV", high: int, low: int) -> None:
+    def __init__(self, parent: "MapBV", high: int, low: int) -> None:
         if high < low:
             raise ValueError(
-                f"BVSlice high ({high}) must be >= low ({low})"
+                f"MapBVSlice high ({high}) must be >= low ({low})"
             )
         if high >= parent.width:
             raise ValueError(
-                f"BVSlice high bit {high} exceeds parent width {parent.width}"
+                f"MapBVSlice high bit {high} exceeds parent width {parent.width}"
             )
         if low < 0:
-            raise ValueError(f"BVSlice low bit must be >= 0, got {low}")
+            raise ValueError(f"MapBVSlice low bit must be >= 0, got {low}")
         self._parent = parent
         self._high = high
         self._low = low
@@ -111,7 +111,7 @@ class BVSlice(_LogicOpsMixin):
     # -- public properties --------------------------------------------------
 
     @property
-    def parent(self) -> "BV":
+    def parent(self) -> "MapBV":
         return self._parent
 
     @property
@@ -138,13 +138,13 @@ class BVSlice(_LogicOpsMixin):
 
     @property
     def value(self) -> int:
-        """Read bits [high:low] from the parent BV."""
+        """Read bits [high:low] from the parent MapBV."""
         mask = (1 << self.width) - 1
         return (self._parent.value >> self._low) & mask
 
     @value.setter
     def value(self, val: int) -> None:
-        """Write bits [high:low] into the parent BV."""
+        """Write bits [high:low] into the parent MapBV."""
         mask = (1 << self.width) - 1
         val &= mask
         parent_val = self._parent.value
@@ -161,11 +161,11 @@ class BVSlice(_LogicOpsMixin):
 
     # -- linking (slice as target) ------------------------------------------
 
-    def link(self, *parts: Union["BV", "BVSlice"]) -> None:
-        """Link parts into this slice of the parent BV.
+    def link(self, *parts: Union["MapBV", "MapBVSlice"]) -> None:
+        """Link parts into this slice of the parent MapBV.
 
         This restructures the parent so that the slice region
-        ``[high:low]`` is replaced by a linked sub-BV composed of *parts*.
+        ``[high:low]`` is replaced by a linked sub-MapBV composed of *parts*.
         The upper and lower bit regions (if any) are preserved as
         independent helper BVs to avoid self-referencing recursion.
         """
@@ -178,7 +178,7 @@ class BVSlice(_LogicOpsMixin):
         if self._parent._is_linked:
             import warnings
             warnings.warn(
-                f"BV '{self._parent.name}' is already linked. "
+                f"MapBV '{self._parent.name}' is already linked. "
                 f"Overwriting existing link structure via slice link.",
                 UserWarning,
                 stacklevel=2,
@@ -188,22 +188,22 @@ class BVSlice(_LogicOpsMixin):
         cur_val = self._parent.value
         parent_w = self._parent.width
 
-        # Build a helper BV for the linked slice region
-        helper = BV(f"_{self._parent.name}[{self._high}:{self._low}]", self.width)
+        # Build a helper MapBV for the linked slice region
+        helper = MapBV(f"_{self._parent.name}[{self._high}:{self._low}]", self.width)
         helper._is_linked = True
         helper._children = list(parts)
 
         # Build independent BVs for preserved upper/lower regions
-        pieces: List[Union[BV, BVSlice]] = []
+        pieces: List[Union[MapBV, MapBVSlice]] = []
         if self._high < parent_w - 1:
             upper_w = parent_w - 1 - self._high
-            upper_bv = BV(f"_{self._parent.name}[{parent_w-1}:{self._high+1}]", upper_w)
+            upper_bv = MapBV(f"_{self._parent.name}[{parent_w-1}:{self._high+1}]", upper_w)
             upper_bv._raw_value = (cur_val >> (self._high + 1)) & ((1 << upper_w) - 1)
             pieces.append(upper_bv)
         pieces.append(helper)
         if self._low > 0:
             lower_w = self._low
-            lower_bv = BV(f"_{self._parent.name}[{self._low-1}:0]", lower_w)
+            lower_bv = MapBV(f"_{self._parent.name}[{self._low-1}:0]", lower_w)
             lower_bv._raw_value = cur_val & ((1 << lower_w) - 1)
             pieces.append(lower_bv)
 
@@ -221,7 +221,7 @@ class BVSlice(_LogicOpsMixin):
     def __eq__(self, other: object) -> bool:
         if isinstance(other, int):
             return self.value == other
-        if isinstance(other, (BV, BVSlice, BVExpr)):
+        if isinstance(other, (MapBV, MapBVSlice, MapBVExpr)):
             return self.value == other.value
         return NotImplemented
 
@@ -229,7 +229,7 @@ class BVSlice(_LogicOpsMixin):
         return id(self)
 
     def __repr__(self) -> str:
-        return f"BVSlice({self._parent.name}[{self._high}:{self._low}])"
+        return f"MapBVSlice({self._parent.name}[{self._high}:{self._low}])"
 
     # -- formatting ---------------------------------------------------------
 
@@ -251,10 +251,10 @@ class BVSlice(_LogicOpsMixin):
 
 
 # ---------------------------------------------------------------------------
-# BVExpr  — logic expression node
+# MapBVExpr  — logic expression node
 # ---------------------------------------------------------------------------
 
-class BVExpr(_LogicOpsMixin):
+class MapBVExpr(_LogicOpsMixin):
     """Represents a combinational logic expression.
 
     Produced by ``&``, ``|``, ``^``, ``~``, ``<<``, ``>>`` operators.
@@ -319,7 +319,7 @@ class BVExpr(_LogicOpsMixin):
     def __eq__(self, other: object) -> bool:
         if isinstance(other, int):
             return self.value == other
-        if isinstance(other, (BV, BVSlice, BVExpr)):
+        if isinstance(other, (MapBV, MapBVSlice, MapBVExpr)):
             return self.value == other.value
         return NotImplemented
 
@@ -328,7 +328,7 @@ class BVExpr(_LogicOpsMixin):
 
     def __repr__(self) -> str:
         ops = ", ".join(repr(o) for o in self._operands)
-        return f"BVExpr({self._op}, [{ops}])"
+        return f"MapBVExpr({self._op}, [{ops}])"
 
     # -- formatting ---------------------------------------------------------
 
@@ -348,19 +348,19 @@ class BVExpr(_LogicOpsMixin):
 
 
 # ---------------------------------------------------------------------------
-# BV  — the main BitVector class
+# MapBV  — the main BitVector class
 # ---------------------------------------------------------------------------
 
-class BV(_LogicOpsMixin):
+class MapBV(_LogicOpsMixin):
     """A symbolic BitVector node.
 
     Usage::
 
         # Named variable
-        reg0 = BV("REG0", 16, tags={"type": "RW", "addr": 0x100})
+        reg0 = MapBV("REG0", 16, tags={"type": "RW", "addr": 0x100})
 
         # Constant
-        padding = BV(0, 2)
+        padding = MapBV(0, 2)
     """
 
     def __init__(
@@ -398,7 +398,7 @@ class BV(_LogicOpsMixin):
 
         # Linking state
         self._is_linked = False
-        self._children: List[Union[BV, BVSlice]] = []
+        self._children: List[Union[MapBV, MapBVSlice]] = []
 
     # -- basic properties ---------------------------------------------------
 
@@ -439,7 +439,7 @@ class BV(_LogicOpsMixin):
         val &= self._mask
         if self._is_const:
             warnings.warn(
-                f"Attempted to write 0x{val:X} to constant BV "
+                f"Attempted to write 0x{val:X} to constant MapBV "
                 f"(width={self._width}). Write ignored.",
                 UserWarning,
                 stacklevel=2,
@@ -456,11 +456,11 @@ class BV(_LogicOpsMixin):
 
     # -- linking ------------------------------------------------------------
 
-    def link(self, *parts: Union["BV", "BVSlice"]) -> None:
-        """Define this BV as a concatenation of *parts* (MSB → LSB order).
+    def link(self, *parts: Union["MapBV", "MapBVSlice"]) -> None:
+        """Define this MapBV as a concatenation of *parts* (MSB → LSB order).
 
         The total width of all parts must equal ``self.width``.
-        Re-linking a BV that is already linked emits a warning.
+        Re-linking a MapBV that is already linked emits a warning.
         """
         total = sum(p.width for p in parts)
         if total != self._width:
@@ -470,7 +470,7 @@ class BV(_LogicOpsMixin):
             )
         if self._is_linked:
             warnings.warn(
-                f"BV '{self._name}' is already linked. "
+                f"MapBV '{self._name}' is already linked. "
                 f"Overwriting existing link structure.",
                 UserWarning,
                 stacklevel=2,
@@ -481,7 +481,7 @@ class BV(_LogicOpsMixin):
     def unlink(self) -> None:
         """Remove the link structure, snapshot the current value.
 
-        After unlinking, the BV holds its last computed value as a raw value.
+        After unlinking, the MapBV holds its last computed value as a raw value.
         """
         if not self._is_linked:
             return
@@ -492,25 +492,25 @@ class BV(_LogicOpsMixin):
 
     # -- slicing ------------------------------------------------------------
 
-    def __getitem__(self, key: slice) -> BVSlice:
-        """``bv[high:low]`` → BVSlice (inclusive both ends)."""
+    def __getitem__(self, key: slice) -> MapBVSlice:
+        """``bv[high:low]`` → MapBVSlice (inclusive both ends)."""
         if not isinstance(key, slice):
-            raise TypeError("BV indexing requires a slice, e.g. bv[7:0]")
+            raise TypeError("MapBV indexing requires a slice, e.g. bv[7:0]")
         high = key.start
         low = key.stop
         if high is None or low is None:
             raise ValueError("Both high and low must be specified: bv[high:low]")
-        return BVSlice(self, high, low)
+        return MapBVSlice(self, high, low)
 
     # -- symbolic eval ------------------------------------------------------
 
     def eval(self, ctx: dict) -> int:
-        """Evaluate this BV symbolically using the context dict.
+        """Evaluate this MapBV symbolically using the context dict.
 
         Context keys can be:
 
-        - **str** — matches any BV with that name (regardless of tags).
-        - **BV.key(name, tags)** — matches only if *both* name AND tags
+        - **str** — matches any MapBV with that name (regardless of tags).
+        - **MapBV.key(name, tags)** — matches only if *both* name AND tags
           dict are an exact match.
 
         Lookup priority:
@@ -547,7 +547,7 @@ class BV(_LogicOpsMixin):
             return []
         segments: List[StructSegment] = []
         for child in self._children:
-            if isinstance(child, BVSlice):
+            if isinstance(child, MapBVSlice):
                 segments.append(
                     StructSegment(bv=child.parent, slice_range=(child.high, child.low))
                 )
@@ -564,7 +564,7 @@ class BV(_LogicOpsMixin):
         Usage::
 
             ctx = {
-                BV.key("REG0", {"color": "red"}): 0xAA,
+                MapBV.key("REG0", {"color": "red"}): 0xAA,
                 "REG1": 0xBB,          # name-only, applies to all REG1
             }
             sram.eval(ctx)
@@ -573,15 +573,15 @@ class BV(_LogicOpsMixin):
 
     @property
     def eval_key(self) -> Optional[tuple]:
-        """The hashable key that ``eval()`` uses to look up this BV.
+        """The hashable key that ``eval()`` uses to look up this MapBV.
 
         Returns ``None`` for constants or BVs with empty tags.
         """
         return self._eval_key
 
     @classmethod
-    def concat(cls, *parts: Union["BV", "BVSlice"], name: str = "CONCAT") -> "BV":
-        """Create a new linked BV by concatenating *parts* (MSB → LSB).
+    def concat(cls, *parts: Union["MapBV", "MapBVSlice"], name: str = "CONCAT") -> "MapBV":
+        """Create a new linked MapBV by concatenating *parts* (MSB → LSB).
 
         Automatically computes the total width.
         """
@@ -593,10 +593,10 @@ class BV(_LogicOpsMixin):
 
     # -- copy / snapshot ----------------------------------------------------
 
-    def copy(self, new_name: Optional[str] = None) -> "BV":
+    def copy(self, new_name: Optional[str] = None) -> "MapBV":
         """Create an independent copy with the current value, no links."""
         n = new_name if new_name is not None else f"{self._name}_copy"
-        new_bv = BV(n, self._width, tags=deepcopy(self._tags))
+        new_bv = MapBV(n, self._width, tags=deepcopy(self._tags))
         new_bv._raw_value = self.value  # snapshot composite value
         return new_bv
 
@@ -613,7 +613,7 @@ class BV(_LogicOpsMixin):
     def __eq__(self, other: object) -> bool:
         if isinstance(other, int):
             return self.value == other
-        if isinstance(other, (BV, BVSlice, BVExpr)):
+        if isinstance(other, (MapBV, MapBVSlice, MapBVExpr)):
             return self.value == other.value
         return NotImplemented
 
@@ -622,8 +622,8 @@ class BV(_LogicOpsMixin):
 
     def __repr__(self) -> str:
         if self._is_const:
-            return f"BV(0x{self._raw_value:X}, {self._width})"
-        return f"BV(\"{self._name}\", {self._width})"
+            return f"MapBV(0x{self._raw_value:X}, {self._width})"
+        return f"MapBV(\"{self._name}\", {self._width})"
 
     # -- formatting ---------------------------------------------------------
 
