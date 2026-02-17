@@ -20,7 +20,7 @@ pip install fxpmath    # NumBV only
 
 ## Data Types
 
-### [MapBV](mypkg/data_types/mapbv_README.md) — Register & Bit Mapping
+### [MapBV](docs/data_types/mapbv.md) — Register & Bit Mapping
 
 位元映射、暫存器結構、雙向同步、邏輯運算、符號化求值。
 
@@ -33,7 +33,7 @@ sram.value = 0xFF       # 寫 SRAM → regs 自動更新
 sram.eval({"REG0": 0xA}) # 模擬不改值
 ```
 
-### [NumBV](mypkg/data_types/numbv_README.md) — Fixed-Point Arithmetic
+### [NumBV](docs/data_types/numbv.md) — Fixed-Point Arithmetic
 
 定點數運算、自動飽和、Q-format、auto-limit。
 
@@ -50,7 +50,7 @@ y = x + 10                     # → val=127 (auto-saturate!)
 
 ## Scheduler
 
-### [Scheduler](mypkg/scheduler/scheduler_README.md) — Job Scheduling
+### [Scheduler](docs/scheduler/scheduler.md) — Job Scheduling
 
 跨平台任務排程器，支援 priority / dependency / 即時 stdout streaming。
 
