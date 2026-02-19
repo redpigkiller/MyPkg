@@ -99,8 +99,8 @@ len(a)                  # → width
 
 ```python
 b = a.copy()                     # Independent deep copy
-y = a.resize(32, 16)             # Q8.8 → Q16.16
-z = a.resize(8, 4)               # Q8.8 → Q4.4
+y = a.cast(32, 16)               # Q8.8 → Q16.16
+z = a.cast(8, 4)                 # Q8.8 → Q4.4
 
 f"{a:hex}"                       # → "0x00C0"
 f"{a:bin}"                       # → "0b00..."
@@ -120,15 +120,32 @@ NumBV(16, 8, value=0.75).report()
 # Rounding  : trunc
 ```
 
-### 9. Array of NumBV
+### 9. Array Processing (`NumBVArray`)
 
-NumBV 是 scalar。需要 array 時，用 Python list：
+為了效能與便利性，請使用 `NumBVArray`（基於 `fxpmath` 的向量化運算），而不要用 list of `NumBV`。
 
 ```python
-data = [NumBV(16, 8, value=v) for v in [0.1, 0.2, 0.5]]
-output = [x * 0.707 for x in data]
-values = [x.val for x in output]
+from mypkg import NumBVArray
+
+# 建立陣列
+arr = NumBVArray(16, 8, values=[1.0, 2.0, 3.0])
+
+# 向量運算 (1.3x overhead vs raw fxpmath)
+result = arr * 2               # → [2.0, 4.0, 6.0] (NumBVArray)
+
+# Indexing & Slicing (List/NumPy style)
+val = arr[0]                   # → Scalar NumBV (Example: 2.0)
+sub = arr[0:2]                 # → Sub-NumBVArray (Example: [2.0, 4.0])
+
+# Bit Slicing (Chaining)
+# arr[0] 回傳 scalar，所以可以接著做 bit slicing
+bits = arr[0][15:8]            # → int (High byte of element 0)
 ```
+
+> **Design Note**: `NumBVArray` 的 `[]` 操作是以 **Element** 為單位（Python list/numpy 慣例），而 `NumBV` (Scalar) 的 `[]` 是以 **Bit** 為單位（SystemVerilog 慣例）。
+> 
+> - `arr[i]` → 取第 i 個元素
+> - `reg[h:l]` → 取 bit h~l
 
 ---
 
@@ -145,7 +162,7 @@ NumBV(width, frac, signed=True, value=0, overflow='saturate', rounding='trunc')
 | `.hex` / `.bin` | `str` | Formatted string |
 | `.from_val(x)` | method | Set from real number |
 | `.from_bits(x)` | method | Set from raw bits |
-| `.resize(w, f)` | method | New NumBV, different format |
+| `.cast(w, f)` | method | New NumBV, different format |
 | `.copy()` | method | Independent copy |
 | `.report()` | method | Print debug summary |
 | `+ - * /` | operators | Arithmetic (→ new NumBV) |

@@ -46,6 +46,22 @@ x = NumBV(8, 0, signed=True, value=120)
 y = x + 10                     # → val=127 (auto-saturate!)
 ```
 
+**New: `NumBVArray` — Vectorized Arithmetic**
+
+高效處理定點數陣列 (wrapped `fxpmath`)。
+
+```python
+# Create Q8.8 array
+arr = NumBVArray(16, 8, values=[1.0, 2.0, 3.0])
+
+# Vectorized & Auto-Saturated
+result = arr * 2               # → [2.0, 4.0, 6.0]
+
+# Bridge to NumBV (scalar)
+val = arr[0]                   # → NumBV(val=2.0)
+lst = arr.to_numbv_list()      # → list[NumBV]
+```
+
 ---
 
 ## Scheduler

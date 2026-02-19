@@ -15,7 +15,7 @@ Sections:
 """
 
 import pytest
-from mypkg import NumBV
+from mypkg import NumBV, NumBVArray
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -135,6 +135,13 @@ class TestArithmetic:
 
     def test_abs_negative(self):
         assert abs(abs(NumBV(16, 8, signed=True, value=-1.5)).val - 1.5) < 0.01
+
+    def test_abs_signed_min(self):
+        """abs(-128) on Q8.0 signed overflows; should clamp to max positive (127)."""
+        a = NumBV(8, 0, signed=True, value=-128)
+        result = abs(a)
+        assert result.val >= 0  # must not be negative
+        assert result.val == 127.0  # clamped to max positive
 
     def test_chain(self):
         """(0.75 * 2) + 0.5 = 2.0"""
@@ -308,7 +315,7 @@ class TestConversions:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-class TestCopyResize:
+class TestCopyCast:
     def test_copy_basic(self):
         a = NumBV(16, 8, value=1.5)
         b = a.copy()
@@ -324,21 +331,21 @@ class TestCopyResize:
         b = NumBV(16, 8, overflow="wrap", rounding="around").copy()
         assert b.overflow == "wrap" and b.rounding == "around"
 
-    def test_resize_basic(self):
-        y = NumBV(16, 8, value=1.5).resize(32, 16)
+    def test_cast_basic(self):
+        y = NumBV(16, 8, value=1.5).cast(32, 16)
         assert y.width == 32 and abs(y.val - 1.5) < 0.001
 
-    def test_resize_narrow(self):
-        y = NumBV(32, 16, value=1.123).resize(8, 4)
+    def test_cast_narrow(self):
+        y = NumBV(32, 16, value=1.123).cast(8, 4)
         assert y.width == 8
 
-    def test_resize_change_signed(self):
-        y = NumBV(16, 8, signed=True, value=1.5).resize(16, 8, new_signed=False)
+    def test_cast_change_signed(self):
+        y = NumBV(16, 8, signed=True, value=1.5).cast(16, 8, new_signed=False)
         assert y.signed is False
 
-    def test_resize_with_overflow(self):
+    def test_cast_with_overflow(self):
         a = NumBV(16, 8, value=1.5)
-        b = a.resize(8, 4, overflow='wrap')
+        b = a.cast(8, 4, overflow='wrap')
         assert b.width == 8 and b.frac == 4
         assert b.overflow == 'wrap'
 
@@ -392,3 +399,211 @@ class TestImmutability:
 
     def test_shift(self):
         a = NumBV(16, 8, value=1.0); _ = a << 4; assert a.val == 1.0
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 12. New Features (Peer Review)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestBitOps:
+    def test_set_bit(self):
+        a = NumBV(8, 0, value=0)
+        a.set_bit(7, True)
+        assert a.bits == 0x80
+        a.set_bit(7, False)
+        assert a.bits == 0x00
+
+    def test_get_bit(self):
+        a = NumBV(8, 0, value=0x05)  # 00000101
+        assert a.get_bit(0) is True
+        assert a.get_bit(1) is False
+        assert a.get_bit(2) is True
+
+    def test_setitem_slice(self):
+        a = NumBV(16, 8, value=0)
+        a[7:0] = 0xFF
+        assert a.bits == 0x00FF
+        a[15:8] = 0xAA
+        assert a.bits == 0xAAFF
+    
+    def test_setitem_masking(self):
+        """Ensure value is masked to slice width."""
+        a = NumBV(8, 0, value=0)
+        a[3:0] = 0xF  # 4 bits logic -> 1111
+        a[3:0] = 0x1F # 5 bits -> should mask to 0xF
+        assert a.bits == 0x0F
+
+
+class TestHelpers:
+    def test_from_list(self):
+        lst = NumBV.from_list([0.1, 0.2], 16, 8)
+        assert len(lst) == 2
+        assert isinstance(lst[0], NumBV)
+        # 0.2 in Q16.8 is 0.19921875
+        assert abs(lst[1].val - 0.2) < (1 / 256)
+
+    def test_clamp(self):
+        a = NumBV(16, 8, value=10.0)
+        assert a.clamp(0, 5).val == 5.0
+        assert a.clamp(0, 20).val == 10.0
+        assert a.clamp(12, 20).val == 12.0
+
+    def test_diff_basic(self):
+        a = NumBV(16, 8, value=1.5)
+        b = a.cast(8, 4)
+        text = a.diff(b)
+        assert "1.5" in text
+        assert "\u0394" in text
+        assert "Q" in text
+
+    def test_diff_same(self):
+        a = NumBV(16, 8, value=1.5)
+        b = a.copy()
+        text = a.diff(b)
+        assert "\u03940.0" in text or "\u0394=0.0" in text or "0.0" in text
+
+
+class TestTempConfig:
+    def test_temp_overflow(self):
+        a = NumBV(8, 0, signed=True, value=120, overflow='saturate')
+        with a.temp_config(overflow='wrap'):
+            b = a + 10
+            assert b.val == -126.0
+        # Should be back to saturate
+        c = a + 10
+        assert c.val == 127.0
+
+
+class TestSafety:
+    def test_hash_none(self):
+        """Mutable object should be unhashable."""
+        a = NumBV(16, 8)
+        with pytest.raises(TypeError):
+            hash(a)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 13. NumBVArray
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestNumBVArray:
+    def test_basic(self):
+        arr = NumBVArray(16, 8, values=[1.0, 2.0, 3.0])
+        assert arr.width == 16
+        assert arr.frac == 8
+        assert arr.signed is True
+        assert len(arr) == 3
+
+    def test_val(self):
+        arr = NumBVArray(16, 8, values=[0.5, 1.0, 1.5])
+        vals = arr.val
+        assert abs(vals[0] - 0.5) < 0.01
+        assert abs(vals[1] - 1.0) < 0.01
+        assert abs(vals[2] - 1.5) < 0.01
+
+    def test_bits(self):
+        arr = NumBVArray(16, 8, values=[0.75])
+        assert arr.bits[0] == 0x00C0
+
+    def test_arithmetic_scalar(self):
+        arr = NumBVArray(16, 8, values=[1.0, 2.0])
+        result = arr * 2
+        assert isinstance(result, NumBVArray)
+        assert abs(result.val[0] - 2.0) < 0.01
+        assert abs(result.val[1] - 4.0) < 0.01
+
+    def test_arithmetic_array(self):
+        a = NumBVArray(16, 8, values=[1.0, 2.0])
+        b = NumBVArray(16, 8, values=[0.5, 0.5])
+        result = a + b
+        assert abs(result.val[0] - 1.5) < 0.01
+        assert abs(result.val[1] - 2.5) < 0.01
+
+    def test_saturation(self):
+        arr = NumBVArray(8, 0, signed=True, values=[120, 125])
+        result = arr + 10
+        assert result.val[0] == 127.0  # saturated
+        assert result.val[1] == 127.0  # saturated
+
+    def test_to_numbv_list(self):
+        arr = NumBVArray(16, 8, values=[0.5, 1.0])
+        lst = arr.to_numbv_list()
+        assert len(lst) == 2
+        assert isinstance(lst[0], NumBV)
+        assert abs(lst[0].val - 0.5) < 0.01
+
+    def test_from_numbv_list(self):
+        items = [NumBV(16, 8, value=v) for v in [0.25, 0.5, 0.75]]
+        arr = NumBVArray.from_numbv_list(items)
+        assert arr.width == 16 and arr.frac == 8
+        assert len(arr) == 3
+        assert abs(arr.val[1] - 0.5) < 0.01
+
+    def test_from_numbv_list_empty(self):
+        with pytest.raises(ValueError):
+            NumBVArray.from_numbv_list([])
+
+    def test_repr(self):
+        arr = NumBVArray(8, 4, values=[1.0])
+        assert "NumBVArray" in repr(arr)
+
+    def test_getitem_int_returns_numbv(self):
+        """arr[i] returns a scalar NumBV."""
+        arr = NumBVArray(16, 8, values=[0.5, 1.0, 1.5])
+        elem = arr[1]
+        assert isinstance(elem, NumBV)
+        assert abs(elem.val - 1.0) < 0.01
+        assert elem.width == 16 and elem.frac == 8
+
+    def test_getitem_negative_index(self):
+        """arr[-1] returns last element (Python convention)."""
+        arr = NumBVArray(16, 8, values=[0.5, 1.0, 1.5])
+        assert abs(arr[-1].val - 1.5) < 0.01
+
+    def test_getitem_slice_returns_array(self):
+        """arr[i:j] returns a NumBVArray (exclusive end, Python convention)."""
+        arr = NumBVArray(16, 8, values=[0.5, 1.0, 1.5, 2.0])
+        sub = arr[1:3]
+        assert isinstance(sub, NumBVArray)
+        assert len(sub) == 2
+        assert abs(sub.val[0] - 1.0) < 0.01
+        assert abs(sub.val[1] - 1.5) < 0.01
+
+    def test_getitem_invalid_raises(self):
+        """arr[non-int/slice] raises TypeError with helpful message."""
+        arr = NumBVArray(16, 8, values=[1.0])
+        with pytest.raises(TypeError, match="int or slice"):
+            arr["bad"]
+
+    def test_setitem_int(self):
+        """arr[i] = v sets element."""
+        arr = NumBVArray(16, 8, values=[0.0, 0.0, 0.0])
+        arr[1] = 1.5
+        assert abs(arr.val[1] - 1.5) < 0.01
+        assert abs(arr.val[0] - 0.0) < 0.01  # others unchanged
+
+    def test_setitem_numbv(self):
+        """arr[i] = NumBV sets element from NumBV value."""
+        arr = NumBVArray(16, 8, values=[0.0, 0.0])
+        arr[0] = NumBV(16, 8, value=0.75)
+        assert abs(arr.val[0] - 0.75) < 0.01
+
+    def test_setitem_slice(self):
+        """arr[i:j] = v broadcasts value to slice."""
+        arr = NumBVArray(16, 8, values=[0.0, 0.0, 0.0, 0.0])
+        arr[1:3] = 2.0
+        assert abs(arr.val[1] - 2.0) < 0.01
+        assert abs(arr.val[2] - 2.0) < 0.01
+        assert abs(arr.val[0] - 0.0) < 0.01  # outside slice unchanged
+
+    def test_chain_index_then_bit_slice(self):
+        """arr[i][msb:lsb] — element index then bit slice."""
+        arr = NumBVArray(16, 8, values=[0.75])  # 0.75 = 0x00C0
+        elem = arr[0]                            # → NumBV
+        high_byte = elem[15:8]                   # → int (bit slice)
+        low_byte  = elem[7:0]
+        assert high_byte == 0x00
+        assert low_byte  == 0xC0
+

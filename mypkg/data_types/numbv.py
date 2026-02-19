@@ -10,7 +10,12 @@ to the left operand's format.  No need to call ``.limit()`` manually.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from typing import Optional, Union
+try:
+    from typing import Self
+except ImportError:
+    from typing_extensions import Self
 
 from fxpmath import Fxp
 
@@ -68,6 +73,11 @@ class NumBV:
             overflow=overflow, rounding=rounding,
         )
 
+    @classmethod
+    def from_list(cls, values: list[float], width: int, frac: int, **kwargs) -> list[NumBV]:
+        """Create a list of NumBV objects (helper)."""
+        return [cls(width, frac, value=v, **kwargs) for v in values]
+
     # ── setting values ────────────────────────────────────────────────────
 
     def from_val(self, real_value: float) -> None:
@@ -76,7 +86,33 @@ class NumBV:
 
     def from_bits(self, raw: int) -> None:
         """Set the value from raw bit pattern (integer)."""
+        # Ensure raw fits in width
+        raw &= self._mask
+        
+        # If signed, interpret MSB as sign bit because fxpmath.set_val(raw=True)
+        # expects a signed integer for signed types.
+        if self._signed and (raw & (1 << (self._width - 1))):
+            raw -= (1 << self._width)
+            
         self._fxp.set_val(raw, raw=True)
+
+    @contextmanager
+    def temp_config(self, overflow: Optional[str] = None, rounding: Optional[str] = None):
+        """Context manager to temporarily change overflow/rounding settings."""
+        old_of, old_rd = self._overflow, self._rounding
+        try:
+            if overflow:
+                self._overflow = overflow
+                self._fxp.overflow = overflow
+            if rounding:
+                self._rounding = rounding
+                self._fxp.rounding = rounding
+            yield self
+        finally:
+            self._overflow = old_of
+            self._fxp.overflow = old_of
+            self._rounding = old_rd
+            self._fxp.rounding = old_rd
 
     # ── properties ────────────────────────────────────────────────────────
 
@@ -138,10 +174,37 @@ class NumBV:
         return float(v.item()) if hasattr(v, "item") else float(v)
 
     def _result(self, fxp: Fxp) -> NumBV:
-        """Create a new NumBV auto-limited to self's format."""
+        """Create a new NumBV auto-limited to self's format (optimized)."""
+        # Create raw instance to bypass __init__ overhead
+        res = NumBV.__new__(NumBV)
+        res._width = self._width
+        res._frac = self._frac
+        res._signed = self._signed
+        res._mask = self._mask
+        res._overflow = self._overflow
+        res._rounding = self._rounding
+        
+        # Reuse config for new Fxp
+        res._fxp = Fxp(
+            self._fxp_to_float(fxp),
+            signed=self._signed,
+            n_word=self._width,
+            n_frac=self._frac,
+            overflow=self._overflow,
+            rounding=self._rounding,
+        )
+        return res
+
+    def clamp(self, min_val: float, max_val: float) -> NumBV:
+        """Limit value to range [min_val, max_val]."""
+        v = self.val
+        if v < min_val: v = min_val
+        elif v > max_val: v = max_val
+        
+        # Create new NumBV with clamped value
         return NumBV(
             self._width, self._frac, self._signed,
-            value=self._fxp_to_float(fxp),
+            value=v,
             overflow=self._overflow, rounding=self._rounding,
         )
 
@@ -180,7 +243,12 @@ class NumBV:
         return self._result(-self._fxp)
 
     def __abs__(self) -> NumBV:
-        return -self if self.val < 0 else self.copy()
+        if self.val < 0:
+            result = -self
+            if result.val < 0:  # signed-min overflow: e.g. abs(-128) → still -128
+                result.from_bits(self._mask >> 1)  # clamp to max positive
+            return result
+        return self.copy()
 
     # ── in-place operators (modify self, auto-limited) ────────────────────
 
@@ -271,7 +339,9 @@ class NumBV:
         return self.val >= self._as_float(other)
 
     def __hash__(self) -> int:
-        return id(self)
+        # Mutable objects should not be hashable by value
+        # return id(self)  # Default behavior, but explicitly None is safer if we want to warn
+        return None
 
     # ── bit-level slicing ─────────────────────────────────────────────────
 
@@ -289,22 +359,63 @@ class NumBV:
         w = high - low + 1
         return (self.bits >> low) & ((1 << w) - 1)
 
-    # ── resize / copy ─────────────────────────────────────────────────────
+    def __setitem__(self, key: slice, value: int) -> None:
+        """``bv[high:low] = val`` — write bits (does not change format)."""
+        if not isinstance(key, slice):
+            raise TypeError("NumBV indexing requires a slice, e.g. bv[15:8]")
+        high, low = key.start, key.stop
+        # Re-use checks from __getitem__ logic logic effectively
+        if high is None or low is None:
+            raise ValueError("Both high and low must be specified: bv[high:low]")
+        if high < low:
+            raise ValueError(f"high ({high}) must be >= low ({low})")
+        if high >= self._width:
+            raise ValueError(f"high bit {high} exceeds width {self._width}")
 
-    def resize(
+        w = high - low + 1
+        mask = (1 << w) - 1
+        val_masked = value & mask
+
+        # Clear target bits and set new
+        # Mask must cover full width to avoid clearing upper bits if self._mask is larger?
+        # self._mask is (1<<width)-1. 
+        # clear_mask should have 0s at target pos, 1s elsewhere.
+        # ~(mask << low) will have 1s at infinite upper bits, so & self._mask cuts it.
+        clear_mask = ~(mask << low) & self._mask
+        new_bits = (self.bits & clear_mask) | (val_masked << low)
+        self.from_bits(new_bits)
+
+    def set_bit(self, pos: int, value: bool) -> None:
+        """Set specific bit high (1) or low (0)."""
+        if not 0 <= pos < self._width:
+             raise ValueError(f"Bit {pos} out of range [0, {self._width-1}]")
+        if value:
+            self.from_bits(self.bits | (1 << pos))
+        else:
+            self.from_bits(self.bits & ~(1 << pos))
+
+    def get_bit(self, pos: int) -> bool:
+        """Get specific bit value."""
+        if not 0 <= pos < self._width:
+             raise ValueError(f"Bit {pos} out of range [0, {self._width-1}]")
+        return bool((self.bits >> pos) & 1)
+
+    # ── cast / copy ───────────────────────────────────────────────────────
+
+    def cast(
         self,
         new_width: int,
         new_frac: int,
         new_signed: Optional[bool] = None,
         overflow: Optional[str] = None,
     ) -> NumBV:
-        """Create a new ``NumBV`` with a different Q-format, preserving value.
+        """Convert to a different Q-format, preserving value (subject to overflow).
 
         Example::
 
             a = NumBV(16, 8, value=1.5)
-            b = a.resize(8, 4)                      # Q8.8 → Q4.4
-            c = a.resize(8, 4, overflow='wrap')      # 指定 overflow
+            b = a.cast(8, 4)                      # Q16.8 → Q8.4
+            c = a.cast(8, 4, overflow='wrap')     # explicit overflow mode
         """
         s = new_signed if new_signed is not None else self._signed
         of = overflow or self._overflow
@@ -324,6 +435,25 @@ class NumBV:
         c._overflow = self._overflow
         c._rounding = self._rounding
         return c
+
+    def diff(self, other: NumBV) -> str:
+        """Return a human-readable comparison of two NumBV objects (debug/verification).
+
+        Example::
+
+            a = NumBV(16, 8, value=1.5)
+            b = a.cast(8, 4)
+            print(a.diff(b))
+        """
+        int_bits_self  = self._width  - self._frac  - int(self._signed)
+        int_bits_other = other._width - other._frac - int(other._signed)
+        lines = [
+            f"Value  : {self.val} vs {other.val}  (\u0394={self.val - other.val})",
+            f"Bits   : {self.bin} vs {other.bin}",
+            f"Format : Q{int_bits_self}.{self._frac} ({'s' if self._signed else 'u'})"
+            f" vs Q{int_bits_other}.{other._frac} ({'s' if other._signed else 'u'})",
+        ]
+        return "\n".join(lines)
 
     # ── report ────────────────────────────────────────────────────────────
 
