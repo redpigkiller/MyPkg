@@ -1,11 +1,11 @@
 """
-PyBitVector (PBV) — A lightweight BitVector library for IC design & verification.
+MapBitVector (MapBV) — A lightweight BitVector library for IC design & verification.
 
 Classes:
     MapBV            — The main BitVector node (named variable or constant).
     MapBVSlice       — A lightweight proxy returned by MapBV[high:low].
     MapBVExpr        — A logic expression node produced by &, |, ^, ~ operators.
-    StructSegment — A data object returned by MapBV.structure for introspection.
+    StructSegment    — A data object returned by MapBV.structure for introspection.
 """
 
 from __future__ import annotations

@@ -64,6 +64,27 @@ lst = arr.to_numbv_list()      # → list[NumBV]
 
 ---
 
+## Utilities
+
+### [StageLogger](docs/utils/stage_logger.md) — Multi-Stage Workflow Logging
+
+專為腳本型多階段流程設計的 Logger，支援依階段分類、錯誤累積與總結報告。
+
+```python
+from mypkg.utils.stage_logger import StageLogger
+
+log = StageLogger("MyFlow")
+log.set_stage("Init")
+log.info("Starting up...", track=True)
+
+log.set_stage("Process")
+log.error("Missing input file")  # Accumulates error without crashing
+
+log.summary()                    # Auto-prints failure report
+```
+
+---
+
 ## Scheduler
 
 ### [Scheduler](docs/scheduler/scheduler.md) — Job Scheduling
