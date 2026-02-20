@@ -66,21 +66,22 @@ lst = arr.to_numbv_list()      # → list[NumBV]
 
 ## Utilities
 
-### [StageLogger](docs/utils/stage_logger.md) — Multi-Stage Workflow Logging
+### [StageTracker](docs/utils/stage_tracker.md) — Multi-Stage Workflow Logging
 
-專為腳本型多階段流程設計的 Logger，支援依階段分類、錯誤累積與總結報告。
+專為腳本型多階段流程設計的 Tracker，支援依階段分類、錯誤累積與總結報告。
 
 ```python
-from mypkg.utils.stage_logger import StageLogger
+from mypkg.utils.stage_tracker import StageTracker
 
-log = StageLogger("MyFlow")
-log.set_stage("Init")
-log.info("Starting up...", track=True)
+tracker = StageTracker() # 全域唯一 Thread-Safe Tracker
+tracker.set_stage("Init") # Flat Mode (依序階段)
+tracker.info("Starting up...")
 
-log.set_stage("Process")
-log.error("Missing input file")  # Accumulates error without crashing
+with tracker.stage("Process"): # Context Mode (自動資源管理)
+    tracker.add_artifact({"key": "value"}) # 紀錄任意物件
+    tracker.error("Missing input file")    # Accumulates error without crashing
 
-log.summary()                    # Auto-prints failure report
+tracker.summary()                    # Auto-prints failure report
 ```
 
 ---

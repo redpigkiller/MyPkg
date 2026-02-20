@@ -1,7 +1,7 @@
 """
-stage_logger.py
+stage_tracker.py
 
-A workflow-oriented logger for sequential, multi-stage processes.
+A workflow-oriented tracker for sequential, multi-stage processes.
 
 Features:
 - Stage lifecycle management (flat or context manager style, not mixed)
@@ -10,31 +10,33 @@ Features:
 - Level-based routing to console and file handlers
 
 Typical usage:
-    from mypkg.utils.stage_logger import StageLogger
+    from mypkg.utils.stage_tracker import StageTracker
 
-    log = StageLogger()
-    log.set_stage("Load")
-    log.info("Reading config...")
-    log.set_stage("Process")
-    log.error("File missing")
-    log.summary()
+    tracker = StageTracker()
+    tracker.set_stage("Load")
+    tracker.info("Reading config...")
+    tracker.set_stage("Process")
+    tracker.error("File missing")
+    tracker.summary()
 """
 
 import sys
 import logging
 import threading
+import json
 from typing import Optional, List, Dict, Any, Callable, Union, Literal
 from enum import Enum
 from dataclasses import dataclass, field
 from contextlib import contextmanager
+
+_console_lock = threading.Lock()
 
 # Optional Rich support
 try:
     from rich.console import Console
     from rich.logging import RichHandler
     from rich.panel import Panel
-    from rich.table import Table
-    from rich import box
+    from rich.text import Text
     HAS_RICH = True
 except ImportError:
     HAS_RICH = False
@@ -44,6 +46,10 @@ except ImportError:
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 ErrorLevelStr = Literal["debug", "info", "warning", "error", "critical"]
 # ==================== Data Structures ====================
+
+class Mode(Enum):
+    FLAT = "flat"
+    CONTEXT = "context"
 
 class ErrorLevel(Enum):
     DEBUG = "debug"
@@ -57,10 +63,11 @@ class Issue:
     level: ErrorLevel
     message: str
     stage: str
-    context: Dict[str, Any] = field(default_factory=dict)
-    
-    def __str__(self):
-        return self.message
+
+@dataclass
+class Artifact:
+    stage: str
+    value: Any
 
 class StageFailedError(Exception):
     """Raised when a stage fails due to accumulated errors or a fatal error."""
@@ -77,28 +84,32 @@ class UsageError(Exception):
     pass
 
 class StageFormatter(logging.Formatter):
+    """Fallback Formatter to inject the current 'stage' if rich is not available."""
     def format(self, record):
-        if not hasattr(record, 'stage'):
-            record.stage = 'System'
+        record.stage = getattr(record, 'stage', 'System')
         return super().format(record)
 
-# ==================== StageLogger ====================
+class EnableFilter(logging.Filter):
+    """Filter to toggle handlers dynamically."""
+    def __init__(self, flag_getter: Callable[[], bool]):
+        self.flag_getter = flag_getter
 
-class StageLogger:
+    def filter(self, record):
+        return self.flag_getter()
+
+# ==================== StageTracker ====================
+
+class StageTracker:
     """
-    Logger optimized for sequential workflows (stages).
-    Supports accumulated errors, checkpoints, and strict mode separation.
-
-    Thread Safety:
-        This class is Thread-Safe. It uses `threading.local()` to maintain isolated 
-        stage hierarchies, issues, and execution states per thread, while sharing 
-        the underlying log routing (handlers/formatters).
+    Workflow tracker optimized for sequential workflows (stages).
+    Supports accumulated errors, checkpoints, execution logs, and artifacts tracking.
     """
     
-    def __init__(self, name: str = "StageLogger", strict_thread: bool = False):
+    def __init__(self, name: str = "StageTracker"):
         self.name = name
         self.logger = logging.getLogger(name)
         self.logger.setLevel(logging.DEBUG) # handle filtering via handlers
+        self.logger.propagate = False # Prevent multi-logging duplication up to root logger
         
         # Thread-Local State
         self._local = threading.local()
@@ -133,6 +144,15 @@ class StageLogger:
         self._local.issues = []
 
     @property
+    def artifacts(self) -> List[Artifact]:
+        if not hasattr(self._local, 'artifacts'):
+            self._local.artifacts = []
+        return self._local.artifacts
+
+    def clear_artifacts(self):
+        self._local.artifacts = []
+
+    @property
     def stage_history(self) -> List[str]:
         if not hasattr(self._local, 'stage_history'):
             self._local.stage_history = []
@@ -143,57 +163,44 @@ class StageLogger:
         self._local.stage_history = value
 
     @property
-    def _mode(self) -> Optional[str]:
+    def _mode(self) -> Optional[Mode]:
         return getattr(self._local, '_mode', None)
 
     @_mode.setter
-    def _mode(self, value: Optional[str]):
+    def _mode(self, value: Optional[Mode]):
         self._local._mode = value
-
-    @property
-    def _console_handler_added(self) -> bool:
-        return getattr(self._local, '_console_handler_added', False)
-
-    @_console_handler_added.setter
-    def _console_handler_added(self, value: bool):
-        self._local._console_handler_added = value
-
-    def _check_thread(self):
-        # With thread-local storage, this is no longer strictly necessary to catch errors,
-        # but we can keep it as a no-op so we don't need to change other code, 
-        # or we can remove the calls entirely. For simplicity, we just pass.
-        pass
 
     # ==================== Configuration ====================
     
-    def add_console_handler(self, level: LogLevel = "INFO", fmt: str = "%(message)s"):
+    def add_console_handler(self, level: LogLevel = "INFO", fmt: Optional[str] = None):
         """
         Add a console handler.
         Note: If the 'rich' library is installed, the `fmt` parameter is ignored
         and formatting is fully delegated to RichHandler.
         """
-        if self._console_handler_added:
-            return
-        self._console_handler_added = True
+        with _console_lock:
+            if getattr(self.logger, '_stage_console_added', False):
+                return
+            self.logger._stage_console_added = True
 
-        if HAS_RICH:
-            handler = RichHandler(
-                console=self._console,
-                show_time=True,
-                show_path=False,
-                markup=True,
-                rich_tracebacks=True,
-                omit_repeated_times=True
-            )
-        else:
-            handler = logging.StreamHandler(sys.stdout)
-            fmt_str = fmt if "%(stage)s" in fmt else "%(asctime)s [%(levelname)s] %(stage)s: %(message)s"
-            formatter = StageFormatter(fmt=fmt_str, datefmt="%H:%M:%S")
-            handler.setFormatter(formatter)
-            
-        handler.setLevel(getattr(logging, level.upper()))
-        handler.addFilter(lambda record: self.console_enabled)
-        self.logger.addHandler(handler)
+            if HAS_RICH:
+                handler = RichHandler(
+                    console=self._console,
+                    show_time=True,
+                    show_path=False,
+                    markup=True,
+                    rich_tracebacks=True,
+                    omit_repeated_times=True
+                )
+            else:
+                handler = logging.StreamHandler(sys.stdout)
+                fmt_str = fmt if fmt is not None else "%(asctime)s [%(levelname)s] %(stage)s: %(message)s"
+                formatter = StageFormatter(fmt=fmt_str, datefmt="%H:%M:%S")
+                handler.setFormatter(formatter)
+                
+            handler.setLevel(getattr(logging, level.upper()))
+            handler.addFilter(EnableFilter(lambda: self.console_enabled))
+            self.logger.addHandler(handler)
 
     def add_file_handler(self, path: str, level: LogLevel = "DEBUG", mode: Literal["w", "a"] = "w", 
                          fmt: str = "%(asctime)s [%(levelname)s] %(stage)s: %(message)s",
@@ -201,33 +208,37 @@ class StageLogger:
         """
         Add a file handler.
         Supported rotation if max_bytes > 0.
+        Note: If max_bytes > 0, 'mode' is forced to 'a' to prevent truncation of the active log upon rotation setup.
         """
         if max_bytes > 0:
             from logging.handlers import RotatingFileHandler
-            handler = RotatingFileHandler(path, mode=mode, maxBytes=max_bytes, backupCount=backup_count, encoding='utf-8')
+            safe_mode = "a" # Prevent erasing the current file mistakenly if rotation is active
+            handler = RotatingFileHandler(path, mode=safe_mode, maxBytes=max_bytes, backupCount=backup_count, encoding='utf-8')
         else:
             handler = logging.FileHandler(path, mode=mode, encoding='utf-8')
             
         formatter = StageFormatter(fmt)
         handler.setFormatter(formatter)
         handler.setLevel(getattr(logging, level.upper()))
-        handler.addFilter(lambda record: self.file_enabled)
+        handler.addFilter(EnableFilter(lambda: self.file_enabled))
         self.logger.addHandler(handler)
 
     def reset(self, keep_handlers: bool = False):
-        """Reset the logger state (clears issues, history, and current stage)."""
-        self._check_thread()
+        """Reset the logger state (clears issues, artifacts, history, and current stage)."""
         self.clear_issues()
+        self.clear_artifacts()
         self.stage_history = []
         self.current_stage = None
         self._mode = None
 
         if not keep_handlers:
-            for h in list(self.logger.handlers):
-                h.close()
-                self.logger.removeHandler(h)
-                
-            self._console_handler_added = False
+            with _console_lock:
+                for h in list(self.logger.handlers):
+                    h.close()
+                    self.logger.removeHandler(h)
+                    
+                if hasattr(self.logger, '_stage_console_added'):
+                    delattr(self.logger, '_stage_console_added')
             self.add_console_handler()
         
     def get_issues(self, stage: Optional[str] = None, level: Optional[Union[ErrorLevel, List[ErrorLevel], ErrorLevelStr, List[ErrorLevelStr]]] = None) -> List[Issue]:
@@ -244,15 +255,18 @@ class StageLogger:
                 levels_to_check = level
                 
             parsed_levels = []
+            valid_levels = [e.value for e in ErrorLevel]
             for lvl in levels_to_check:
-                if isinstance(lvl, str):
-                    try:
-                        parsed_levels.append(ErrorLevel(lvl.lower()))
-                    except ValueError:
-                        valid_levels = [e.value for e in ErrorLevel]
+                if isinstance(lvl, ErrorLevel):
+                    parsed_levels.append(lvl)
+                elif isinstance(lvl, str):
+                    lvl_lower = lvl.strip().lower()
+                    if lvl_lower in valid_levels:
+                        parsed_levels.append(ErrorLevel(lvl_lower))
+                    else:
                         raise ValueError(f"Invalid Level: '{lvl}'. Available options: {valid_levels}")
                 else:
-                    parsed_levels.append(lvl)
+                    raise TypeError(f"Expected ErrorLevel or str, got {type(lvl)}")
                     
             result = [i for i in result if i.level in parsed_levels]
             
@@ -260,9 +274,9 @@ class StageLogger:
 
     # ==================== Stage Management ====================
 
-    def _set_mode(self, mode: str):
+    def _set_mode(self, mode: Mode):
         if self._mode is not None and self._mode != mode:
-            raise UsageError(f"Cannot mix {mode} mode with previously used {self._mode} mode.")
+            raise UsageError(f"Cannot mix {mode.value} mode with previously used {self._mode.value} mode.")
         self._mode = mode
 
     def set_stage(self, name: str):
@@ -270,28 +284,32 @@ class StageLogger:
         Start a new stage (Flat Mode). 
         Finalizes the previous stage if one exists.
         """
-        self._check_thread()
-        self._set_mode('flat')
-        prev_stage = self.current_stage
-
-        # Finalize previous stage
-        if prev_stage:
-            self._check_stage_health(prev_stage)
+        self._set_mode(Mode.FLAT)
+        self.finalize_stage() # Close previous stage
 
         self.current_stage = name
         self.stage_history.append(name)
         self._log_system(f"Stage: {name}", level="DEBUG")
+
+    def finalize_stage(self):
+        """
+        Explicitly close the current stage.
+        Primarily used in Flat Mode to trigger the health check before moving on or summarizing.
+        """
+        stage = self.current_stage
+        if stage:
+            self._check_stage_health(stage)
+            self.current_stage = None
 
     @contextmanager
     def stage(self, name: str):
         """
         Context manager for a stage.
         """
-        self._check_thread()
-        self._set_mode('context')
+        self._set_mode(Mode.CONTEXT)
         
         if self.current_stage is not None:
-             raise UsageError(f"Nested stages are not allowed. Currently in '{self.current_stage}'.")
+             raise UsageError(f"Nested stages are not allowed. Currently in '{self.current_stage}'. Please exhaust the current stage or use a sub-tracker.")
              
         self.current_stage = name
         self.stage_history.append(name)
@@ -305,9 +323,9 @@ class StageLogger:
             raise
         finally:
             stage_name = self.current_stage
-            self.current_stage = None
-
+            
             if has_exception:
+                self.current_stage = None
                 errors = [i for i in self.issues if i.stage == stage_name
                     and i.level in (ErrorLevel.ERROR, ErrorLevel.CRITICAL)]
                 
@@ -317,7 +335,7 @@ class StageLogger:
                         level="WARNING"
                     )
             else:
-                self._check_stage_health(stage_name)
+                self.finalize_stage()
     
     def _check_stage_health(self, stage: str):
         """Check if the given stage has accumulated fatal errors."""
@@ -335,14 +353,20 @@ class StageLogger:
             return
         self._check_stage_health(self.current_stage)
 
-    # ==================== Logging Methods ====================
+    # ==================== Logging & Tracking Methods ====================
+
+    def add_artifact(self, value: Any):
+        """Record an artifact, config, or execution context variable to the current stage."""
+        stage = self.current_stage if self.current_stage else "-"
+        artifact = Artifact(stage=stage, value=value)
+        self.artifacts.append(artifact)
 
     def _log(self, level_enum: ErrorLevel, msg: str, track: bool, **kwargs):
         """Internal logging handler."""
-        self._check_thread()
         stage = self.current_stage if self.current_stage else "-"
-        kwargs.setdefault('extra', {})['stage'] = stage
-        data = kwargs.pop('data', {})
+        extra = dict(kwargs.pop('extra', {}))
+        extra['stage'] = stage
+        kwargs['extra'] = extra
         
         # 1. Record Issue
         issue = None
@@ -351,32 +375,16 @@ class StageLogger:
             issue = Issue(
                 level=level_enum,
                 message=msg,
-                stage=stage,
-                context=data
+                stage=stage
             )
             self.issues.append(issue)
 
         # 2. Emit to Logging System
-        if data:
-            class LazyJSONFormatter:
-                def __init__(self, msg, data):
-                    self.msg = msg
-                    self.data = data
-                def __str__(self):
-                    import json
-                    try:
-                        data_str = json.dumps(self.data, indent=2, ensure_ascii=False, default=str)
-                        return f"{self.msg}\nData: {data_str}"
-                    except Exception:
-                        return f"{self.msg}\nData: {self.data}"
-            
-            # Use %s formatting so serialize only happens if handler accepts level
-            getattr(self.logger, level_enum.value)("%s", LazyJSONFormatter(msg, data), **kwargs)
-        else:
-            getattr(self.logger, level_enum.value)(msg, **kwargs)
+        getattr(self.logger, level_enum.value)(msg, **kwargs)
 
         return issue if track else None
 
+    # Note: debug/info track defaults to False, warning defaults to True
     def debug(self, msg: str, track: bool = False, **kwargs):
         self._log(ErrorLevel.DEBUG, msg, track, **kwargs)
 
@@ -386,19 +394,19 @@ class StageLogger:
     def warning(self, msg: str, track: bool = True, **kwargs):
         self._log(ErrorLevel.WARNING, msg, track, **kwargs)
 
-    def error(self, msg: str, **kwargs):
-        self._log(ErrorLevel.ERROR, msg, True, **kwargs)
+    def error(self, msg: str, exc_info: bool = False, **kwargs):
+        self._log(ErrorLevel.ERROR, msg, True, exc_info=exc_info, **kwargs)
 
-    def fatal(self, msg: str, **kwargs):
-        issue = self._log(ErrorLevel.CRITICAL, msg, True, **kwargs)
+    def fatal(self, msg: str, exc_info: bool = False, **kwargs):
+        issue = self._log(ErrorLevel.CRITICAL, msg, True, exc_info=exc_info, **kwargs)
         # Raise immediately
         stage = self.current_stage or "Unknown"
-        if issue is None:
-            raise RuntimeError("fatal() must always produce an Issue. 'track' may have been forced to False.")
-        raise StageFailedError(stage, [issue], message=f"Fatal error in stage '{stage}': {msg}")
+        stage_issues = [i for i in self.issues if i.stage == stage and i.level in (ErrorLevel.ERROR, ErrorLevel.CRITICAL)]
+        raise StageFailedError(stage, stage_issues, message=f"Fatal error in stage '{stage}': {msg}")
     
-    def _log_system(self, msg: str, level : LogLevel = "DEBUG"):
+    def _log_system(self, msg: str, level: LogLevel = "DEBUG"):
         """Log system messages (like stage headers) that don't produce Issues."""
+        # mypy type checking workaround: use getattr string since LogLevel includes custom formats
         getattr(self.logger, level.lower())(msg, extra={'stage': self.current_stage or "System"})
 
     # ==================== Summary ====================
@@ -406,12 +414,14 @@ class StageLogger:
     def summary(self, title: str = "EXECUTION SUMMARY") -> bool:
         """Print execution summary and return True if successful (no errors), False otherwise."""
         # Force a health check for the last unclosed flat stage
-        if self._mode == 'flat' and self.current_stage:
+        if self._mode == Mode.FLAT and self.current_stage:
             try:
-                self.checkpoint()
+                self.finalize_stage()
             except StageFailedError:
-                # We expect the exception, it means the last stage had errors.
-                # Continue printing summary.
+                # We intentionally swallow the exception here because we just want the 
+                # health check to potentially commit the stage issue count before summary.
+                # The user will check summary() return value to see if anything failed.
+                self.logger.debug("Final stage health check failed, proceeding to error summary.")
                 pass
                 
         if HAS_RICH and self._console:
@@ -448,6 +458,30 @@ class StageLogger:
             for i in errors:
                 self._console.print(f"  [{i.stage}] {i.message}")
                 
+        # Group artifacts by stage
+        if self.artifacts:
+            self._console.print("\n[bold magenta]\\[RECORDS & ARTIFACTS][/]")
+            artifacts_by_stage = {}
+            for r in self.artifacts:
+                artifacts_by_stage.setdefault(r.stage, []).append(r)
+                
+            for stg, recs in artifacts_by_stage.items():
+                self._console.print(f"  [cyan]\\[{stg}][/cyan]")
+                for r in recs:
+                    # Format dicts/lists nicely, else standard str
+                    val_str = ""
+                    if isinstance(r.value, (dict, list)):
+                        try:
+                            formatted = json.dumps(r.value, indent=2, ensure_ascii=False, default=str)
+                            # Indent the JSON block
+                            val_str = "\n".join("      " + line for line in formatted.splitlines())
+                        except Exception:
+                            val_str = "      " + str(r.value)
+                    else:
+                        val_str = "      " + str(r.value)
+                    
+                    self._console.print(val_str)
+
         if errors:
              self._console.print(f"\n[bold red]FAILED ({len(errors)} errors)[/]")
         else:
@@ -478,6 +512,27 @@ class StageLogger:
             print(f"\n{len(errors)} errors:")
             for i in errors:
                 print(f"  [{i.stage}] {i.message}")
+                
+        # Group artifacts by stage
+        if self.artifacts:
+            print("\n[RECORDS & ARTIFACTS]")
+            artifacts_by_stage = {}
+            for r in self.artifacts:
+                artifacts_by_stage.setdefault(r.stage, []).append(r)
+                
+            for stg, recs in artifacts_by_stage.items():
+                print(f"  [{stg}]")
+                for r in recs:
+                    val_str = ""
+                    if isinstance(r.value, (dict, list)):
+                        try:
+                            formatted = json.dumps(r.value, indent=2, ensure_ascii=False, default=str)
+                            val_str = "\n".join("      " + line for line in formatted.splitlines())
+                        except Exception:
+                            val_str = "      " + str(r.value)
+                    else:
+                        val_str = "      " + str(r.value)
+                    print(val_str)
         
         print("\n" + "-"*40)
         if errors:

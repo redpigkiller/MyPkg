@@ -1,4 +1,4 @@
-# StageLogger
+# StageTracker
 
 A workflow-oriented logger for sequential, multi-stage processes. Designed to handle execution tracking, accumulated error handling, checkpointing, and auto-generated summaries.
 
@@ -6,9 +6,9 @@ A workflow-oriented logger for sequential, multi-stage processes. Designed to ha
 
 - **Stage Lifecycle Management**: Neatly separates execution into stages (e.g. "Load" -> "Process" -> "Upload").
 - **Thread-Safe**: Uses `threading.local()` so each thread maintains its own stage history and issue tracking, while sharing log handlers.
-- **Accumulated Error Handling**: Unlike standard logging where errors are scattered, `StageLogger` collects them and allows you to fail early (`checkpoint`) or wait until the summary.
+- **Accumulated Error Handling**: Unlike standard logging where errors are scattered, `StageTracker` collects them and allows you to fail early (`checkpoint`) or wait until the summary.
 - **Rich Summary Generation**: Auto-generates a clean summary console block displaying total errors and warnings organized by stage.
-- **Lazy Evaluation**: `log.info(..., data=my_dict)` delays expensive JSON serialization until truly needed by the handler.
+- **Lazy Evaluation**: `tracker.info(..., data=my_dict)` delays expensive JSON serialization until truly needed by the handler.
 
 ## Basic Usage
 
@@ -16,48 +16,48 @@ A workflow-oriented logger for sequential, multi-stage processes. Designed to ha
 Best for top-down, sequential scripts.
 
 ```python
-from mypkg.utils.stage_logger import StageLogger
+from mypkg.utils.stage_tracker import StageTracker
 
 # Shared instance pattern
-log = StageLogger("MainTracker")
+tracker = StageTracker("MainTracker")
 
 # Starts "Initialization" stage
-log.set_stage("Initialization")
-log.info("Starting workflow", track=True)
-log.warning("Debug mode enabled")
+tracker.set_stage("Initialization")
+tracker.info("Starting workflow", track=True)
+tracker.warning("Debug mode enabled")
 
 # Implicitly finalizes "Initialization" and starts "Processing"
-log.set_stage("Data Processing")
-log.error("File 'corrupt.txt' is corrupt") # Accumulates issue
-log.error("File 'missing.txt' not found")
+tracker.set_stage("Data Processing")
+tracker.error("File 'corrupt.txt' is corrupt") # Accumulates issue
+tracker.error("File 'missing.txt' not found")
 
 # Will raise StageFailedError because of the two errors above
 try:
-    log.checkpoint()
+    tracker.checkpoint()
 except Exception as e:
     print(e)
     
-log.summary()
+tracker.summary()
 ```
 
 ### Context Manager Mode
 Best for isolated blocks, loops, or complex nested logic.
 
 ```python
-from mypkg.utils.stage_logger import StageLogger
+from mypkg.utils.stage_tracker import StageTracker
 
-log = StageLogger("ContextTracker")
+tracker = StageTracker("ContextTracker")
 
-with log.stage("Download"):
-    log.info("Downloading files...")
+with tracker.stage("Download"):
+    tracker.info("Downloading files...")
     # Health checked automatically upon exit. 
-    # If any `log.error()` was called, StageFailedError is raised here.
+    # If any `tracker.error()` was called, StageFailedError is raised here.
 
-with log.stage("Parsing"):
-    log.fatal("Out of memory!") # Raises StageFailedError immediately
+with tracker.stage("Parsing"):
+    tracker.fatal("Out of memory!") # Raises StageFailedError immediately
 ```
 
-*Note: You cannot mix Flat Mode and Context Manager Mode loops within the same `StageLogger` execution context.*
+*Note: You cannot mix Flat Mode and Context Manager Mode loops within the same `StageTracker` execution context.*
 
 ## API Reference
 
@@ -67,10 +67,10 @@ with log.stage("Parsing"):
 * `reset(keep_handlers=False)`: Clears all accumulated issues, stage history, and the current stage. Useful before restarting a workflow in the same thread.
 
 ### Logging
-* `debug(msg, track=False, **kwargs)`: Standard debug log.
-* `info(msg, track=False, **kwargs)`: Standard info log. Set `track=True` to include in the ending summary block.
+* `debug(msg, track=False, **kwargs)`: Standard debug tracker.
+* `info(msg, track=False, **kwargs)`: Standard info tracker. Set `track=True` to include in the ending summary block.
 * `warning(msg, track=True, **kwargs)`: Warning log, tracked in summary by default.
-* `error(msg, **kwargs)`: Error log. Adds an error issue. Does not raise immediately.
+* `error(msg, **kwargs)`: Error tracker. Adds an error issue. Does not raise immediately.
 * `fatal(msg, **kwargs)`: Logs a critical error and raises `StageFailedError` immediately.
 
 ### Methods
