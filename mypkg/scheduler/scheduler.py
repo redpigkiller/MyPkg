@@ -305,7 +305,6 @@ class Scheduler:
         """Core scheduler loop: dispatch ready jobs to thread pool."""
         max_workers = sum(self._capacity.values())
         with ThreadPoolExecutor(max_workers=max(max_workers, 1)) as pool:
-            futures = []
             while True:
                 if self._stop_event.is_set():
                     break
@@ -315,8 +314,7 @@ class Scheduler:
                     for job in ready:
                         self._acquire_resources(job)
                         job.status = RUNNING
-                        fut = pool.submit(self._run_job, job)
-                        futures.append(fut)
+                        pool.submit(self._run_job, job)
 
                 # Check if all done
                 with self._lock:

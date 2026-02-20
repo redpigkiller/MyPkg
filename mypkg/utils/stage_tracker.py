@@ -36,7 +36,6 @@ try:
     from rich.console import Console
     from rich.logging import RichHandler
     from rich.panel import Panel
-    from rich.text import Text
     HAS_RICH = True
 except ImportError:
     HAS_RICH = False

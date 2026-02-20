@@ -15,6 +15,7 @@ Sections:
 """
 
 import pytest
+pytest.importorskip("fxpmath")
 from mypkg import NumBV, NumBVArray
 
 

@@ -6,14 +6,13 @@ A lightweight Python toolkit for IC design & verification engineers.
 
 ## Installation
 
-```python
-# Add MyPkg to your Python path, then:
-from mypkg import MapBV, NumBV
-```
-
-Dependencies:
+### Quick Install & Test
 ```bash
-pip install fxpmath    # NumBV only
+python -m venv venv
+# Windows: venv\\Scripts\\activate | Mac/Linux: source venv/bin/activate
+pip install -e .          # Core features only
+pip install -e .[math]    # Full features (NumBV & NumBVArray)
+pytest -q                 # Run tests
 ```
 
 ---
@@ -25,12 +24,20 @@ pip install fxpmath    # NumBV only
 位元映射、暫存器結構、雙向同步、邏輯運算、符號化求值。
 
 ```python
+from mypkg import MapBV
 reg = MapBV("REG0", 16, tags={"type": "RW", "addr": 0x100})
 sram = MapBV("SRAM", 8)
+padding = MapBV(0, 2)
+field = MapBV("FIELD", 4)
+
 sram.link(reg[3:0], padding, field[1:0])
 
 sram.value = 0xFF       # 寫 SRAM → regs 自動更新
-sram.eval({"REG0": 0xA}) # 模擬不改值
+print(f"REG0 lower 4 bits: {reg.value:X}") # -> F
+
+# 模擬不改原本的值
+sim_val = sram.eval({"REG0": 0xA, "FIELD": 0x1}) 
+print(f"Simulated SRAM: {sim_val:X}") # -> A1
 ```
 
 ### [NumBV](docs/data_types/numbv.md) — Fixed-Point Arithmetic
