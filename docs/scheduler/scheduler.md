@@ -1,6 +1,9 @@
 # Scheduler — Cross-Platform Job Scheduler
 
-輕量級任務排程器，基於 threading，適用於 IO-bound 工作負載（VCS 模擬、batch 指令等）。
+[![English](https://img.shields.io/badge/Language-English-blue.svg)](scheduler.md)
+[![繁體中文](https://img.shields.io/badge/語言-繁體中文-blue.svg)](scheduler_zh.md)
+
+A lightweight job scheduler based on threading, optimized for IO-bound workloads (e.g., VCS simulations, batch commands).
 
 ---
 
@@ -16,8 +19,8 @@ sim_job = CmdJob("sim_01", cmd="vcs -R +tc=01", cwd="/proj/sim",
                  depends_on=[compile_job], priority=10, timeout=600)
 
 sched.submit(compile_job, sim_job)
-sched.run()          # blocking — 跑完才 return
-sched.summary()      # 印出狀態表
+sched.run()          # blocking — returns only when finished
+sched.summary()      # Prints the status table
 ```
 
 ---
@@ -32,75 +35,75 @@ Scheduler(
 )
 ```
 
-### 基本控制
+### Basic Controls
 
 | Method | Description |
 |--------|-------------|
-| `submit(*jobs)` | 加入 job 到佇列 |
-| `run()` | **Blocking** — 全部跑完才回來 |
-| `start()` | **Non-blocking** — 背景 thread 執行 |
-| `wait()` | 等待 `start()` 完成 |
-| `stop()` | 停止排程 (完成進行中的 job) |
+| `submit(*jobs)` | Add jobs to the queue |
+| `run()` | **Blocking** — Wait until all jobs complete |
+| `start()` | **Non-blocking** — Run in background thread |
+| `wait()` | Wait for `start()` to complete |
+| `stop()` | Stop scheduling (finishes ongoing jobs) |
 
-### 互動控制
+### Interactive Controls
 
 | Method | Description |
 |--------|-------------|
-| `get(name)` | 取得 Job 物件 |
-| `follow(name, n=20)` | 附加到 job 的 output stream |
-| `cancel(name)` | 取消 pending job |
-| `kill(name)` | 終止 running job |
-| `set_priority(name, n)` | 改變 pending job 的 priority |
-| `actions(name)` | 列出 job 特有操作 |
-| `action(name, act)` | 執行 job 的特定操作 |
+| `get(name)` | Get a Job object |
+| `follow(name, n=20)` | Attach to a job's output stream |
+| `cancel(name)` | Cancel a pending job |
+| `kill(name)` | Terminate a running job |
+| `set_priority(name, n)` | Change the priority of a pending job |
+| `actions(name)` | List job-specific actions |
+| `action(name, act)` | Execute a job's specific action |
 
-### 報告 & 篩選
+### Reporting & Filtering
 
 | Method / Property | Description |
 |-------------------|-------------|
-| `status()` | 輕量狀態表 |
-| `summary()` | 完整狀態表 (含 exit code, duration) |
-| `jobs` | 所有 jobs |
-| `pending` | 未開始的 jobs |
-| `running` | 執行中的 jobs |
-| `done` | 完成的 jobs |
-| `failed` | 失敗 + 取消的 jobs |
+| `status()` | Lightweight status table |
+| `summary()` | Full status table (includes exit code, duration) |
+| `jobs` | All jobs |
+| `pending` | Unstarted jobs |
+| `running` | Executing jobs |
+| `done` | Completed jobs |
+| `failed` | Failed + canceled jobs |
 
 ---
 
-## CmdJob — 本機指令
+## CmdJob — Local Commands
 
 ```python
 CmdJob(
     name="sim_01",
     cmd="python run.py --tc 01",
-    cwd="/proj/sim",                        # 工作目錄 (可選)
-    env={"SEED": "42"},                     # 額外環境變數 (可選)
-    priority=10,                            # 數字越大越優先 (預設 0)
-    depends_on=[compile_job],               # 依賴 (可選)
-    resources={"local": 1},                 # 預設 local=1
-    timeout=600,                            # 超時自動 kill (秒, 可選)
+    cwd="/proj/sim",                        # Working directory (optional)
+    env={"SEED": "42"},                     # Extra environment variables (optional)
+    priority=10,                            # Higher is more prioritized (default 0)
+    depends_on=[compile_job],               # Dependencies (optional)
+    resources={"local": 1},                 # Default local=1
+    timeout=600,                            # Auto-kill upon timeout in seconds (optional)
 )
 ```
 
 ### Output Streaming
 
 ```python
-job.on_output(print)          # 即時 callback
-job.remove_output(cb)         # 移除 callback
-job.tail(20)                  # 最近 20 行
-job.output_lines              # 完整歷史
+job.on_output(print)          # Real-time callback
+job.remove_output(cb)         # Remove callback
+job.tail(20)                  # Last 20 lines
+job.output_lines              # Full history
 ```
 
 ### CmdJob Actions
 
-執行完畢後自動提供：
-- `open_log` — 跨平台開啟 log 檔案
-- `open_cwd` — 跨平台開啟工作目錄
+Automatically provided after completion:
+- `open_log` — Cross-platform open log file
+- `open_cwd` — Cross-platform open working directory
 
 ```python
-sched.actions("sim_01")              # 列出
-sched.action("sim_01", "open_log")   # 執行
+sched.actions("sim_01")              # List actions
+sched.action("sim_01", "open_log")   # Execute
 ```
 
 ---
@@ -112,33 +115,33 @@ GridJob(
     name="grid_sim",
     cmd="vcs -R +tc=01",
     cwd="/proj/sim",
-    submit_opts="-q regression -pe smp 2",  # qsub 選項
+    submit_opts="-q regression -pe smp 2",  # qsub options
     priority=5,
     depends_on=[compile_job],
-    resources={"grid": 1},                  # 預設 grid=1
-    poll_interval=10.0,                     # qstat 查詢間隔 (秒)
+    resources={"grid": 1},                  # Default grid=1
+    poll_interval=10.0,                     # qstat polling interval (seconds)
 )
 ```
 
-### 工作流程
+### Workflow
 
-1. 自動產生 shell script → `qsub` 提交
-2. 週期性 `qstat -j <id>` 查狀態
-3. 串流 log 檔案內容作為 output
-4. 完成後清理 temp script
+1. Auto-generates shell script → submits via `qsub`
+2. Periodically checks status using `qstat -j <id>`
+3. Streams log file contents as output
+4. Cleans up temp scripts upon completion
 
-### GridJob 覆寫
+### GridJob Overrides
 
-| 方法 | 用途 |
+| Method | Purpose |
 |------|------|
 | `kill()` | `qdel <grid_id>` |
-| `actions()` | `grid_status` — 查詢 qstat |
-| `_parse_grid_id(output)` | 解析 qsub 回傳的 job ID |
-| `_check_grid_status()` | 解析 qstat 狀態 |
+| `actions()` | `grid_status` — queries qstat |
+| `_parse_grid_id(output)` | Parses the job ID returned by qsub |
+| `_check_grid_status()` | Parses qstat status |
 
-### 自訂 Grid 系統
+### Custom Grid Systems
 
-繼承 `GridJob` 並覆寫：
+Inherit `GridJob` and override:
 
 ```python
 class SlurmJob(GridJob):
@@ -159,24 +162,24 @@ class SlurmJob(GridJob):
 
 ---
 
-## 互動範例
+## Interactive Examples
 
 ```python
 sched = Scheduler(resources={"local": 4, "grid": 8}, log_dir="./logs")
 # ... submit jobs ...
 sched.start()
 
-sched.status()                     # 看目前狀態
-sched.follow("sim_01")             # 即時看 output
-sched.cancel("sim_03")             # 取消 pending
-sched.kill("sim_02")               # kill running
-sched.set_priority("sim_04", 100)  # 提高優先度
-sched.actions("sim_01")            # 查看可用操作
+sched.status()                     # View current status
+sched.follow("sim_01")             # View output in real-time
+sched.cancel("sim_03")             # Cancel pending
+sched.kill("sim_02")               # Kill running
+sched.set_priority("sim_04", 100)  # Increase priority
+sched.actions("sim_01")            # View available actions
 
 sched.wait()
 sched.summary()
 
-# 篩選
+# Filtering
 for j in sched.failed:
     print(f"FAIL: {j.name}  exit={j.exit_code}")
 ```

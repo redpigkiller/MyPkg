@@ -1,5 +1,8 @@
 # MyPkg — Data Types for IC Design & Verification
 
+[![繁體中文](https://img.shields.io/badge/語言-繁體中文-blue.svg)](README_zh.md)
+[![English](https://img.shields.io/badge/Language-English-blue.svg)](README.md)
+
 A lightweight Python toolkit for IC design & verification engineers.
 
 ---
@@ -9,7 +12,7 @@ A lightweight Python toolkit for IC design & verification engineers.
 ### Quick Install & Test
 ```bash
 python -m venv venv
-# Windows: venv\\Scripts\\activate | Mac/Linux: source venv/bin/activate
+# Windows: venv\Scripts\activate | Mac/Linux: source venv/bin/activate
 pip install -e .          # Core features only
 pip install -e .[math]    # Full features (NumBV & NumBVArray)
 pytest -q                 # Run tests
@@ -21,7 +24,7 @@ pytest -q                 # Run tests
 
 ### [MapBV](docs/data_types/mapbv.md) — Register & Bit Mapping
 
-位元映射、暫存器結構、雙向同步、邏輯運算、符號化求值。
+Bit mapping, register structures, bidirectional synchronization, logic operations, and symbolic evaluation.
 
 ```python
 from mypkg import MapBV
@@ -32,17 +35,17 @@ field = MapBV("FIELD", 4)
 
 sram.link(reg[3:0], padding, field[1:0])
 
-sram.value = 0xFF       # 寫 SRAM → regs 自動更新
+sram.value = 0xFF       # Write to SRAM → regs automatically update
 print(f"REG0 lower 4 bits: {reg.value:X}") # -> F
 
-# 模擬不改原本的值
+# Simulation without modifying the original value
 sim_val = sram.eval({"REG0": 0xA, "FIELD": 0x1}) 
 print(f"Simulated SRAM: {sim_val:X}") # -> A1
 ```
 
 ### [NumBV](docs/data_types/numbv.md) — Fixed-Point Arithmetic
 
-定點數運算、自動飽和、Q-format、auto-limit。
+Fixed-point arithmetic, auto-saturation, Q-format, and auto-limit.
 
 ```python
 a = NumBV(16, 8, value=0.75)   # Q8.8
@@ -55,7 +58,7 @@ y = x + 10                     # → val=127 (auto-saturate!)
 
 **New: `NumBVArray` — Vectorized Arithmetic**
 
-高效處理定點數陣列 (wrapped `fxpmath`)。
+Efficient processing of fixed-point number arrays (wraps `fxpmath`).
 
 ```python
 # Create Q8.8 array
@@ -75,17 +78,17 @@ lst = arr.to_numbv_list()      # → list[NumBV]
 
 ### [StageTracker](docs/utils/stage_tracker.md) — Multi-Stage Workflow Logging
 
-專為腳本型多階段流程設計的 Tracker，支援依階段分類、錯誤累積與總結報告。
+A tracker designed for script-based multi-stage workflows, supporting stage classification, error accumulation, and summary reporting.
 
 ```python
 from mypkg.utils.stage_tracker import StageTracker
 
-tracker = StageTracker() # 全域唯一 Thread-Safe Tracker
-tracker.set_stage("Init") # Flat Mode (依序階段)
+tracker = StageTracker() # Globally unique thread-safe tracker
+tracker.set_stage("Init") # Flat Mode (Sequential stages)
 tracker.info("Starting up...")
 
-with tracker.stage("Process"): # Context Mode (自動資源管理)
-    tracker.add_artifact({"key": "value"}) # 紀錄任意物件
+with tracker.stage("Process"): # Context Mode (Auto resource management)
+    tracker.add_artifact({"key": "value"}) # Record any object
     tracker.error("Missing input file")    # Accumulates error without crashing
 
 tracker.summary()                    # Auto-prints failure report
@@ -97,7 +100,7 @@ tracker.summary()                    # Auto-prints failure report
 
 ### [Scheduler](docs/scheduler/scheduler.md) — Job Scheduling
 
-跨平台任務排程器，支援 priority / dependency / 即時 stdout streaming。
+Cross-platform task scheduler supporting priority, dependencies, and real-time stdout streaming.
 
 ```python
 sched = Scheduler(resources={"local": 4}, log_dir="./logs")

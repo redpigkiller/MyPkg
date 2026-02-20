@@ -1,27 +1,30 @@
 # NumBV — Fixed-Point Arithmetic
 
-像 numpy 之於矩陣，NumBV 是定點數的運算引擎。  
-定義好格式後，所有運算**自動保持格式**，不需要手動處理溢位。
+[![English](https://img.shields.io/badge/Language-English-blue.svg)](numbv.md)
+[![繁體中文](https://img.shields.io/badge/語言-繁體中文-blue.svg)](numbv_zh.md)
+
+Like NumPy is to matrices, NumBV is the arithmetic engine for fixed-point numbers.
+Once the format is defined, all operations **automatically preserve the format** without requiring manual overflow handling.
 
 ## Quick Start
 
 ```python
 from mypkg import NumBV
 
-# 宣告 Q8.8 格式 (16-bit, 8-bit fraction)
+# Declare Q8.8 format (16-bit, 8-bit fraction)
 a = NumBV(16, 8, value=0.75)
 
-# 直接運算 — 結果自動保持 Q8.8
+# Direct calculation — result automatically stays Q8.8
 b = a * 1.5
 print(b.val, b.width)            # → 1.125, 16
 
-# 自動飽和 — 不會溢位反轉
+# Auto-saturation — prevents overflow wrapping
 x = NumBV(8, 0, signed=True, value=120)
 y = x + 10
-print(y.val)                     # → 127 (自動飽和！)
+print(y.val)                     # → 127 (Auto-saturated!)
 
-# In-place 運算
-x *= 2                           # x 被修改, 同一個物件
+# In-place operation
+x *= 2                           # x is modified in-place, same object
 ```
 
 ---
@@ -38,23 +41,23 @@ c = NumBV(16, 8, overflow='wrap', rounding='around')
 
 ### 2. Arithmetic — Auto-Limit
 
-所有運算結果**自動回到左運算元的格式**，依 `overflow` 設定處理溢位。
+All arithmetic results **automatically return to the format of the left operand**, handling overflow according to the `overflow` setting.
 
 ```python
-# 新物件（a 不變）
+# New objects (a remains unchanged)
 b = a + 0.5
 b = a * 1.5
 b = 5.0 - a
 b = -a
 b = abs(a)
-b = a << 4            # 位元左移
-b = a >> 2            # 右移 (signed = 算術移位)
+b = a << 4            # Bitwise left shift
+b = a >> 2            # Right shift (signed = arithmetic shift)
 ```
 
-### 3. In-Place 運算
+### 3. In-Place Operations
 
 ```python
-# 修改自身（同一個物件）
+# Modifies self (same object)
 a += 0.5
 a -= 1
 a *= 2
@@ -67,7 +70,7 @@ a >>= 2
 
 ```python
 x = NumBV(8, 0, signed=True, value=120)
-y = x + 10            # → 127 (saturate，預設)
+y = x + 10            # → 127 (saturate, default)
 
 z = NumBV(8, 0, signed=True, overflow='wrap', value=120)
 w = z + 10            # → -126 (wrap)
@@ -79,8 +82,8 @@ w = z + 10            # → -126 (wrap)
 a.bits                  # → int (unsigned raw value)
 a.hex                   # → "0x00C0"
 a.bin                   # → "0b0000000011000000"
-a[15:8]                 # → 0x00 (高 8 位元)
-a.bits & 0xFF           # → Python int 位元運算
+a[15:8]                 # → 0x00 (High 8 bits)
+a.bits & 0xFF           # → Python int bitwise operations
 ```
 
 ### 6. Comparisons & Conversions
@@ -122,15 +125,15 @@ NumBV(16, 8, value=0.75).report()
 
 ### 9. Array Processing (`NumBVArray`)
 
-為了效能與便利性，請使用 `NumBVArray`（基於 `fxpmath` 的向量化運算），而不要用 list of `NumBV`。
+For performance and convenience, use `NumBVArray` (vectorized operations based on `fxpmath`) instead of a list of `NumBV`.
 
 ```python
 from mypkg import NumBVArray
 
-# 建立陣列
+# Create array
 arr = NumBVArray(16, 8, values=[1.0, 2.0, 3.0])
 
-# 向量運算 (1.3x overhead vs raw fxpmath)
+# Vectorized operation (1.3x overhead vs raw fxpmath)
 result = arr * 2               # → [2.0, 4.0, 6.0] (NumBVArray)
 
 # Indexing & Slicing (List/NumPy style)
@@ -138,14 +141,14 @@ val = arr[0]                   # → Scalar NumBV (Example: 2.0)
 sub = arr[0:2]                 # → Sub-NumBVArray (Example: [2.0, 4.0])
 
 # Bit Slicing (Chaining)
-# arr[0] 回傳 scalar，所以可以接著做 bit slicing
+# arr[0] returns a scalar, so we can chain bit slicing
 bits = arr[0][15:8]            # → int (High byte of element 0)
 ```
 
-> **Design Note**: `NumBVArray` 的 `[]` 操作是以 **Element** 為單位（Python list/numpy 慣例），而 `NumBV` (Scalar) 的 `[]` 是以 **Bit** 為單位（SystemVerilog 慣例）。
+> **Design Note**: Array indexing `[]` on `NumBVArray` operates on **Elements** (following Python list/NumPy conventions), while `[]` on `NumBV` (Scalar) operates on **Bits** (following SystemVerilog conventions).
 > 
-> - `arr[i]` → 取第 i 個元素
-> - `reg[h:l]` → 取 bit h~l
+> - `arr[i]` → Gets the i-th element
+> - `reg[h:l]` → Gets bits h~l
 
 ---
 
@@ -163,7 +166,7 @@ NumBV(width, frac, signed=True, value=0, overflow='saturate', rounding='trunc')
 | `.from_val(x)` | method | Set from real number |
 | `.from_bits(x)` | method | Set from raw bits |
 | `.cast(w, f)` | method | New NumBV, different format |
-| `.copy()` | method | Independent copy |
+| `.copy()` | method | Independent deep copy |
 | `.report()` | method | Print debug summary |
 | `+ - * /` | operators | Arithmetic (→ new NumBV) |
 | `+= -= *= /=` | in-place | Modify self |

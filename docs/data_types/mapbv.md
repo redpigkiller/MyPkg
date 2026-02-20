@@ -1,5 +1,8 @@
 # MapBV — Register & Bit Mapping
 
+[![English](https://img.shields.io/badge/Language-English-blue.svg)](mapbv.md)
+[![繁體中文](https://img.shields.io/badge/語言-繁體中文-blue.svg)](mapbv_zh.md)
+
 Describe registers, SRAM mappings, and logic operations with intuitive Python objects — complete with **bidirectional value sync**, **symbolic evaluation**, and **structure introspection**.
 
 ## Quick Start

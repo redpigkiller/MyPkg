@@ -1,5 +1,8 @@
 # StageTracker
 
+[![English](https://img.shields.io/badge/Language-English-blue.svg)](stage_tracker.md)
+[![繁體中文](https://img.shields.io/badge/語言-繁體中文-blue.svg)](stage_tracker_zh.md)
+
 A workflow-oriented logger for sequential, multi-stage processes. Designed to handle execution tracking, accumulated error handling, checkpointing, and auto-generated summaries.
 
 ## Key Features
