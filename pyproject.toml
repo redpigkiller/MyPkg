@@ -17,6 +17,7 @@ dependencies = []
 [project.optional-dependencies]
 math = ["fxpmath"]
 rich = ["rich"]
+excel = ["openpyxl"]
 
 [tool.setuptools.packages.find]
 include = ["mypkg*"]

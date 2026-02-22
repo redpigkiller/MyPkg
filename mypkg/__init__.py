@@ -4,6 +4,16 @@ from mypkg.data_types.mapbv import MapBV, MapBVSlice, MapBVExpr, StructSegment
 from mypkg.scheduler import Scheduler, Job, CmdJob
 
 try:
+    from mypkg.excel_extractor import (
+        match_template,
+        Block, Row, Col, EmptyRow, EmptyCol, Group,
+        Types, MatchOptions, MatchTolerance, MatchResult, NodeResult,
+    )
+    HAS_EXCEL = True
+except ImportError:
+    HAS_EXCEL = False
+
+try:
     from mypkg.data_types.numbv import NumBV
     from mypkg.data_types.numbvarray import NumBVArray
     HAS_MATH = True
@@ -22,4 +32,7 @@ __all__ = [
     "NumBV",
     "NumBVArray",
     "Scheduler", "Job", "CmdJob",
+    "match_template",
+    "Block", "Row", "Col", "EmptyRow", "EmptyCol", "Group",
+    "Types", "MatchOptions", "MatchTolerance", "MatchResult", "NodeResult",
 ]
