@@ -3,28 +3,49 @@ Job — Base job abstraction for the Scheduler.
 
 Classes:
     Job      — Base class representing a schedulable unit of work.
-    CmdJob   — Concrete subclass for shell commands (local execution).
 """
 
 from __future__ import annotations
 
+import logging
 import os
+import signal
 import subprocess
 import sys
 import threading
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
 
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # JobStatus constants
 # ---------------------------------------------------------------------------
 
-PENDING = "pending"
-RUNNING = "running"
-DONE = "done"
-FAILED = "failed"
-CANCELLED = "cancelled"
+JobStatus = Literal["pending", "running", "done", "failed", "cancelled"]
+
+PENDING: JobStatus = "pending"
+RUNNING: JobStatus = "running"
+DONE: JobStatus = "done"
+FAILED: JobStatus = "failed"
+CANCELLED: JobStatus = "cancelled"
+
+
+# ---------------------------------------------------------------------------
+# OutputMatcher
+# ---------------------------------------------------------------------------
+
+MatchTiming = Literal["realtime", "post"]
+HookEvent = Literal["on_start", "on_done", "on_fail", "on_cancel", "on_output"]
+
+@dataclass
+class OutputMatcher:
+    name: str
+    match_fn: Callable[[str], Any]
+    callback: Callable[[Any, "Job"], None]
+    once: bool
+    timing: MatchTiming
 
 
 # ---------------------------------------------------------------------------
@@ -81,7 +102,7 @@ class Job:
         self.timeout = timeout
 
         # --- runtime state (managed by Scheduler) ---
-        self.status: str = PENDING
+        self.status: JobStatus = PENDING
         self.exit_code: Optional[int] = None
         self.duration: Optional[float] = None
         self.log_path: Optional[Path] = None
@@ -92,10 +113,24 @@ class Job:
 
         # --- stdout streaming ---
         self._output_buffer: List[str] = []
-        self._callbacks: List[Callable[[str], None]] = []
         self._lock = threading.Lock()
 
-    # ----- execution (subclasses override) -----
+        # --- hooks & matchers & actions ---
+        self._matchers: List[OutputMatcher] = []
+        self._hooks: Dict[str, List[Callable]] = {
+            "on_start": [], "on_done": [], "on_fail": [],
+            "on_cancel": [], "on_output": [],
+        }
+        self._actions: Dict[str, Tuple[str, Callable[[], None]]] = {}
+
+    # ----- execution lifecycle (subclasses override) -----
+
+    def _pre_execute(self) -> None:
+        """Called before ``_execute()``.  Subclasses override for setup logic.
+
+        This runs inside the worker thread, after ``on_start`` hooks.
+        """
+        pass
 
     def _execute(self, log_file=None) -> None:
         """Run the job.  Subclasses **must** override this.
@@ -111,32 +146,68 @@ class Job:
             f"{type(self).__name__} must implement _execute()."
         )
 
+    def _post_execute(self) -> None:
+        """Called automatically after job finishes to run post logic and hooks."""
+        self._proc_ready.clear()
+        self._proc = None
+
+        # run post matchers
+        with self._lock:
+            lines = list(self._output_buffer)
+            matchers = [m for m in self._matchers if m.timing == "post"]
+
+        for line in lines:
+            to_remove = []
+            for m in matchers:
+                try:
+                    res = m.match_fn(line)
+                    if res:
+                        m.callback(res, self)
+                        if m.once:
+                            to_remove.append(m)
+                except Exception as exc:
+                    logger.debug(
+                        "Matcher %r raised during post-match: %s", m.name, exc
+                    )
+            for m in to_remove:
+                matchers.remove(m)
+
+        if self.status == DONE:
+            self._trigger_hook("on_done")
+        elif self.status == CANCELLED:
+            self._trigger_hook("on_cancel")
+        elif self.status == FAILED:
+            self._trigger_hook("on_fail")
+
     # ----- output streaming API -----
 
-    def on_output(self, callback: Callable[[str], None]) -> None:
-        """Register a callback invoked for each stdout line.
-
-        The callback receives a single string (one line, newline stripped).
-        Thread-safe: callbacks are invoked from the worker thread.
-        """
-        self._callbacks.append(callback)
-
-    def remove_output(self, callback: Callable[[str], None]) -> None:
-        """Unregister a previously registered output callback."""
-        try:
-            self._callbacks.remove(callback)
-        except ValueError:
-            pass
-
     def _emit_line(self, line: str) -> None:
-        """Internal: buffer a line and notify all callbacks."""
+        """Internal: buffer a line and notify all hooks / matchers."""
         with self._lock:
             self._output_buffer.append(line)
-        for cb in self._callbacks:
+            # snapshot matchers under lock
+            matchers = [m for m in self._matchers if m.timing == "realtime"]
+
+        to_remove = []
+        for m in matchers:
             try:
-                cb(line)
-            except Exception:
-                pass  # never let a bad callback crash the worker
+                res = m.match_fn(line)
+                if res:
+                    m.callback(res, self)
+                    if m.once:
+                        to_remove.append(m.name)
+            except Exception as exc:
+                logger.debug(
+                    "Matcher %r raised during realtime match: %s", m.name, exc
+                )
+        for m_name in to_remove:
+            self.remove_matcher(m_name)
+
+        for hook_cb in self._hooks["on_output"]:
+            try:
+                hook_cb(line, self)
+            except Exception as exc:
+                logger.debug("on_output hook raised: %s", exc)
 
     def tail(self, n: int = 20) -> List[str]:
         """Return the last *n* lines of captured output."""
@@ -151,12 +222,8 @@ class Job:
 
     # ----- interactive control -----
 
-    def send(self, text: str) -> None:
-        """Write *text* to the running process's stdin.
-
-        Raises ``RuntimeError`` if the job is not running or stdin is
-        unavailable.
-        """
+    def send_input(self, text: str) -> None:
+        """Write *text* to the running process's stdin."""
         if self.status != RUNNING:
             raise RuntimeError(f"Job {self.name!r} is not running (status={self.status}).")
         # Wait for process handle (status may change to RUNNING before Popen).
@@ -166,12 +233,33 @@ class Job:
         self._proc.stdin.write(text)
         self._proc.stdin.flush()
 
-    def kill(self) -> None:
+    def interrupt(self) -> None:
+        """Send SIGINT to the running process."""
+        if self.status != RUNNING:
+            raise RuntimeError(f"Job {self.name!r} is not running (status={self.status}).")
+        self._proc_ready.wait(timeout=10)
+        if self._proc is None:
+            raise RuntimeError(f"Job {self.name!r}: no process handle.")
+
+        if sys.platform == "win32":
+            try:
+                self._proc.send_signal(signal.CTRL_C_EVENT)
+            except Exception:
+                self._proc.terminate()
+        else:
+            self._proc.send_signal(signal.SIGINT)
+
+    def kill(self, force: bool = False) -> None:
         """Terminate the running process.
 
-        Subclasses can override for non-local jobs (e.g. ``GridJob`` → ``qdel``).
+        If force=False, calls interrupt() instead of forceful kill.
+        Subclasses can override for custom kill behaviour.
         Raises ``RuntimeError`` if job is not running.
         """
+        if not force:
+            self.interrupt()
+            return
+
         if self.status != RUNNING:
             raise RuntimeError(f"Job {self.name!r} is not running (status={self.status}).")
         # Wait for process handle (status may change to RUNNING before Popen).
@@ -192,12 +280,78 @@ class Job:
             except subprocess.TimeoutExpired:
                 self._proc.kill()
 
+    # ----- actions -----
+
     def actions(self) -> Dict[str, Tuple[str, Callable]]:
         """Return job-type-specific actions as ``{name: (description, callable)}``.
 
         Subclasses override to provide extra features.
         """
-        return {}
+        return dict(self._actions)
+
+    def register_action(self, name: str, description: str, fn: Callable[[], None]) -> None:
+        """Register a new action for this job."""
+        self._actions[name] = (description, fn)
+
+    # ----- matchers -----
+
+    def add_matcher(
+        self,
+        match_fn: Callable[[str], Any],
+        callback: Callable[[Any, "Job"], None],
+        *,
+        name: Optional[str] = None,
+        once: bool = False,
+        timing: MatchTiming = "realtime"
+    ) -> None:
+        """Add an OutputMatcher for log analysis."""
+        if name is None:
+            name = f"matcher_{len(self._matchers)}_{id(match_fn)}"
+        with self._lock:
+            self._matchers.append(OutputMatcher(name, match_fn, callback, once, timing))
+
+    def remove_matcher(self, name: str) -> None:
+        """Remove an OutputMatcher by name."""
+        with self._lock:
+            self._matchers = [m for m in self._matchers if m.name != name]
+
+    # ----- hooks -----
+
+    def add_hook(self, event: HookEvent, callback: Callable) -> None:
+        """Add a lifecycle hook.
+
+        Events: ``"on_start"``, ``"on_done"``, ``"on_fail"``,
+        ``"on_cancel"``, ``"on_output"``.
+
+        Callback signatures:
+        - ``on_output``: ``callback(line: str, job: Job) -> None``
+        - all others:    ``callback(job: Job) -> None``
+        """
+        if event not in self._hooks:
+            raise ValueError(f"Invalid hook event: {event}. Allowed: {list(self._hooks.keys())}")
+        self._hooks[event].append(callback)
+
+    def remove_hook(self, event: HookEvent, callback: Callable) -> None:
+        """Remove a previously registered hook callback.
+
+        Silently does nothing if the callback was not found.
+        """
+        if event not in self._hooks:
+            raise ValueError(f"Invalid hook event: {event}. Allowed: {list(self._hooks.keys())}")
+        try:
+            self._hooks[event].remove(callback)
+        except ValueError:
+            pass
+
+    def _trigger_hook(self, event: HookEvent) -> None:
+        """Invoke all callbacks for a lifecycle event."""
+        for cb in self._hooks.get(event, []):
+            try:
+                # on_output has different signature and is called via _emit_line
+                if event != "on_output":
+                    cb(self)
+            except Exception as exc:
+                logger.debug("Hook %r callback raised: %s", event, exc)
 
     # ----- helpers -----
 
@@ -215,72 +369,3 @@ class Job:
             f"{self.job_type}({self.name!r}, status={self.status!r}, "
             f"exit_code={self.exit_code}, priority={self.priority})"
         )
-
-
-# ---------------------------------------------------------------------------
-# CmdJob — local command execution
-# ---------------------------------------------------------------------------
-
-def _open_file_cross_platform(path: Union[str, Path]) -> None:
-    """Open a file or directory with the system default handler."""
-    path = str(path)
-    if sys.platform == "win32":
-        os.startfile(path)
-    elif sys.platform == "darwin":
-        subprocess.Popen(["open", path])
-    else:
-        subprocess.Popen(["xdg-open", path])
-
-
-class CmdJob(Job):
-    """A job that runs a shell command on the local machine.
-
-    Default resources: ``{"local": 1}``
-
-    Example::
-
-        job = CmdJob("compile", cmd="make -j4", cwd="/proj/rtl", timeout=600)
-    """
-
-    default_resources: Dict[str, int] = {"local": 1}
-
-    def _execute(self, log_file=None) -> None:
-        """Run a shell command via subprocess."""
-        env = None
-        if self.env:
-            env = {**os.environ, **self.env}
-
-        proc = subprocess.Popen(
-            self.cmd,
-            shell=True,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            cwd=self.cwd,
-            env=env,
-            text=True,
-            bufsize=1,  # line-buffered
-        )
-        self._proc = proc
-        self._proc_ready.set()
-
-        # Stream stdout line-by-line
-        assert proc.stdout is not None
-        for raw_line in proc.stdout:
-            line = raw_line.rstrip("\n").rstrip("\r")
-            self._emit_line(line)
-            if log_file:
-                log_file.write(raw_line)
-                log_file.flush()
-
-        proc.wait()
-        self.exit_code = proc.returncode
-        self.status = DONE if proc.returncode == 0 else FAILED
-
-    def actions(self) -> Dict[str, Tuple[str, Callable]]:
-        acts: Dict[str, Tuple[str, Callable]] = {}
-        if self.log_path and self.log_path.exists():
-            acts["open_log"] = ("開啟 log 檔案", lambda: _open_file_cross_platform(self.log_path))
-        if self.cwd:
-            acts["open_cwd"] = ("開啟工作目錄", lambda: _open_file_cross_platform(self.cwd))
-        return acts

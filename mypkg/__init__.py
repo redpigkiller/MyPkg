@@ -1,7 +1,7 @@
 """MyPkg — A collection of utilities for IC design & verification."""
 
 from mypkg.data_types.mapbv import MapBV, MapBVSlice, MapBVExpr, StructSegment
-from mypkg.scheduler import Scheduler, Job, CmdJob, GridJob
+from mypkg.scheduler import Scheduler, Job, CmdJob
 
 try:
     from mypkg.data_types.numbv import NumBV
@@ -21,5 +21,5 @@ __all__ = [
     "MapBV", "MapBVSlice", "MapBVExpr", "StructSegment",
     "NumBV",
     "NumBVArray",
-    "Scheduler", "Job", "CmdJob", "GridJob",
+    "Scheduler", "Job", "CmdJob",
 ]

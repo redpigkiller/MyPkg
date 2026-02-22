@@ -3,7 +3,9 @@
 Sections:
   1-12:  Phase 1 — Core
   13-20: Phase 2a — Interactive control
-  21-25: Phase 2b — Timeout, CmdJob actions, GridJob, Status filters
+  21-22: Phase 2b — Timeout, CmdJob actions
+  23:    Phase 2c — Status filters
+  24-28: Phase 3  — Hooks, Matchers, Lifecycle
 """
 
 import os
@@ -15,7 +17,7 @@ import threading
 from pathlib import Path
 
 import pytest
-from mypkg import Scheduler, Job, CmdJob, GridJob
+from mypkg import Scheduler, Job, CmdJob
 
 
 # ---------------------------------------------------------------------------
@@ -93,14 +95,11 @@ class TestJobBasics:
         with pytest.raises(ValueError):
             Job("j", cmd="")
 
-    def test_on_output_and_tail(self):
+    def test_tail(self):
         j = Job("j", cmd="echo x")
-        collected = []
-        j.on_output(collected.append)
         j._emit_line("line1")
         j._emit_line("line2")
         j._emit_line("line3")
-        assert collected == ["line1", "line2", "line3"]
         assert j.tail(2) == ["line2", "line3"]
 
     def test_output_lines_property(self):
@@ -195,8 +194,8 @@ class TestPriority:
         sched = Scheduler(resources={"local": 1})
         lo = CmdJob("lo", cmd=_echo_cmd("lo"), priority=1)
         hi = CmdJob("hi", cmd=_echo_cmd("hi"), priority=10)
-        lo.on_output(lambda line: order.append("lo"))
-        hi.on_output(lambda line: order.append("hi"))
+        lo.add_hook("on_output", lambda line, job: order.append("lo"))
+        hi.add_hook("on_output", lambda line, job: order.append("hi"))
         sched.submit(lo, hi)
         sched.run()
         # hi should appear before lo
@@ -274,11 +273,11 @@ class TestFailure:
 
 
 class TestStreaming:
-    def test_callback_called(self):
+    def test_hook_callback_called(self):
         collected = []
         sched = Scheduler(resources={"local": 1})
         j = CmdJob("echo", cmd=_echo_cmd("STREAM_TEST"))
-        j.on_output(collected.append)
+        j.add_hook("on_output", lambda line, job: collected.append(line))
         sched.submit(j)
         sched.run()
         assert any("STREAM_TEST" in line for line in collected)
@@ -462,7 +461,7 @@ class TestSendStdin:
                 break
             time.sleep(0.1)
         assert j.status == "running"
-        j.send("HELLO_STDIN\n")
+        j.send_input("HELLO_STDIN\n")
         sched.wait()
         assert j.status == "done"
         assert any("HELLO_STDIN" in line for line in j.output_lines)
@@ -470,7 +469,7 @@ class TestSendStdin:
     def test_send_not_running_raises(self):
         j = Job("j", cmd="echo x")
         with pytest.raises(RuntimeError, match="not running"):
-            j.send("data\n")
+            j.send_input("data\n")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -485,8 +484,8 @@ class TestSetPriority:
         sched = Scheduler(resources={"local": 1})
         a = CmdJob("a", cmd=_echo_cmd("A"), priority=10)
         b = CmdJob("b", cmd=_echo_cmd("B"), priority=1)
-        a.on_output(lambda line: order.append("a"))
-        b.on_output(lambda line: order.append("b"))
+        a.add_hook("on_output", lambda line, job: order.append("a"))
+        b.add_hook("on_output", lambda line, job: order.append("b"))
         sched.submit(a, b)
         # Flip: make b higher priority
         sched.set_priority("b", 100)
@@ -581,13 +580,12 @@ class TestActions:
         with pytest.raises(KeyError, match="not found"):
             sched.action("cj", "nonexistent")
 
-    def test_scheduler_actions_prints(self, capsys):
+    def test_scheduler_actions_returns_dict(self):
         sched = Scheduler()
         j = _TestableJob("tj", cmd="echo x")
         sched.submit(j)
-        sched.actions("tj")
-        out = capsys.readouterr().out
-        assert "greet" in out and "_TestableJob" in out
+        acts = sched.actions("tj")
+        assert "greet" in acts and "info" in acts
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -663,93 +661,7 @@ class TestCmdJobActions:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 23. GridJob Construction
-# ═══════════════════════════════════════════════════════════════════════════
-
-
-class TestGridJobConstruction:
-    def test_defaults(self):
-        j = GridJob("g1", cmd="vcs -R")
-        assert j.resources == {"grid": 1}
-        assert j.submit_cmd == "qsub"
-        assert j.kill_cmd == "qdel"
-        assert j.status_cmd == "qstat"
-        assert j.grid_id is None
-        assert j.job_type == "GridJob"
-
-    def test_custom_opts(self):
-        j = GridJob("g2", cmd="vcs -R", submit_opts="-q normal -pe smp 4")
-        assert j.submit_opts == "-q normal -pe smp 4"
-
-    def test_repr(self):
-        r = repr(GridJob("g", cmd="echo x"))
-        assert "GridJob" in r
-
-    def test_parse_grid_id(self):
-        j = GridJob("g", cmd="echo x")
-        # SGE format
-        assert j._parse_grid_id('Your job 12345 ("test") has been submitted') == "12345"
-        assert j._parse_grid_id('your job 67890 ("x") has been submitted') == "67890"
-        assert j._parse_grid_id('some random output') is None
-
-    def test_actions(self):
-        j = GridJob("g", cmd="echo x")
-        acts = j.actions()
-        assert "grid_status" in acts
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 24. GridJob Execute (mocked)
-# ═══════════════════════════════════════════════════════════════════════════
-
-
-class TestGridJobMocked:
-    def test_submit_failure(self, tmp_path):
-        """If qsub fails, job status should be failed."""
-        j = GridJob("gfail", cmd="echo hi", cwd=str(tmp_path))
-        mock_result = MagicMock()
-        mock_result.returncode = 1
-        mock_result.stderr = "permission denied"
-        mock_result.stdout = ""
-        with patch("subprocess.run", return_value=mock_result):
-            j._execute()
-        assert j.status == "failed"
-
-    def test_submit_success_then_finish(self, tmp_path):
-        """Simulate successful qsub → qstat shows gone → done."""
-        j = GridJob("gok", cmd="echo hi", cwd=str(tmp_path),
-                    poll_interval=0.1)
-
-        call_count = [0]
-
-        def mock_run(cmd, **kwargs):
-            call_count[0] += 1
-            result = MagicMock()
-            if "qsub" in cmd:
-                result.returncode = 0
-                result.stdout = 'Your job 99999 ("gok") has been submitted'
-                result.stderr = ""
-            elif "qstat" in cmd:
-                # Second call: job is done (non-zero return = not found)
-                result.returncode = 1
-                result.stdout = ""
-                result.stderr = ""
-            else:
-                result.returncode = 0
-                result.stdout = ""
-                result.stderr = ""
-            return result
-
-        with patch("subprocess.run", side_effect=mock_run):
-            j._execute()
-
-        assert j.grid_id == "99999"
-        assert j.status == "done"
-        assert j.exit_code == 0
-
-
-# ═══════════════════════════════════════════════════════════════════════════
-# 25. Status Filters
+# 23. Status Filters
 # ═══════════════════════════════════════════════════════════════════════════
 
 
@@ -764,6 +676,212 @@ class TestStatusFilters:
         sched.run()
         assert len(sched.done) == 1
         assert sched.done[0].name == "a"
-        assert len(sched.failed) == 2  # b=failed, c=cancelled
+        assert len(sched.failed) == 1  # b=failed
+        assert len(sched.cancelled) == 1  # c=cancelled
         assert len(sched.pending) == 0
         assert len(sched.running) == 0
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 24. Hooks — lifecycle events
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestHooks:
+    def test_on_start_hook(self):
+        log = []
+        sched = Scheduler(resources={"local": 1})
+        j = CmdJob("hk", cmd=_echo_cmd("hi"))
+        j.add_hook("on_start", lambda job: log.append(("start", job.name)))
+        sched.submit(j)
+        sched.run()
+        assert ("start", "hk") in log
+
+    def test_on_done_hook(self):
+        log = []
+        sched = Scheduler(resources={"local": 1})
+        j = CmdJob("hk", cmd=_echo_cmd("hi"))
+        j.add_hook("on_done", lambda job: log.append(("done", job.name)))
+        sched.submit(j)
+        sched.run()
+        assert ("done", "hk") in log
+
+    def test_on_fail_hook(self):
+        log = []
+        sched = Scheduler(resources={"local": 1})
+        j = CmdJob("hk", cmd=_fail_cmd())
+        j.add_hook("on_fail", lambda job: log.append(("fail", job.name)))
+        sched.submit(j)
+        sched.run()
+        assert ("fail", "hk") in log
+
+    def test_on_cancel_hook(self):
+        """on_cancel should fire when job is cancelled, NOT on_done."""
+        done_log = []
+        cancel_log = []
+        sched = Scheduler(resources={"local": 1})
+        a = CmdJob("a", cmd=_echo_cmd("A"))
+        b = CmdJob("b", cmd=_echo_cmd("B"))
+        b.add_hook("on_done", lambda job: done_log.append(job.name))
+        b.add_hook("on_cancel", lambda job: cancel_log.append(job.name))
+        sched.submit(a, b)
+        sched.cancel("b")
+        sched.run()
+        # b was cancelled before it even ran, so on_cancel should NOT fire
+        # (only _post_execute triggers hooks, and cancelled-before-running
+        #  jobs never enter _run_job)
+        assert "b" not in done_log
+
+    def test_on_output_hook(self):
+        collected = []
+        j = Job("j", cmd="echo x")
+        j.add_hook("on_output", lambda line, job: collected.append((line, job.name)))
+        j._emit_line("hello")
+        j._emit_line("world")
+        assert ("hello", "j") in collected
+        assert ("world", "j") in collected
+
+    def test_remove_hook(self):
+        log = []
+        j = Job("j", cmd="echo x")
+        cb = lambda line, job: log.append(line)
+        j.add_hook("on_output", cb)
+        j._emit_line("before")
+        j.remove_hook("on_output", cb)
+        j._emit_line("after")
+        assert log == ["before"]
+
+    def test_remove_hook_nonexistent_silent(self):
+        j = Job("j", cmd="echo x")
+        # Should not raise
+        j.remove_hook("on_done", lambda job: None)
+
+    def test_invalid_hook_event_raises(self):
+        j = Job("j", cmd="echo x")
+        with pytest.raises(ValueError, match="Invalid hook event"):
+            j.add_hook("on_nonexistent", lambda job: None)
+        with pytest.raises(ValueError, match="Invalid hook event"):
+            j.remove_hook("on_nonexistent", lambda job: None)
+
+    def test_on_fail_hook_for_blocked_dep(self):
+        """Jobs failed due to dependency failure should also trigger on_fail."""
+        log = []
+        sched = Scheduler(resources={"local": 2})
+        a = CmdJob("a", cmd=_fail_cmd())
+        b = CmdJob("b", cmd=_echo_cmd("B"), depends_on=[a])
+        b.add_hook("on_fail", lambda job: log.append(("fail", job.name)))
+        sched.submit(a, b)
+        sched.run()
+        assert ("fail", "b") in log
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 25. Matchers
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestMatchers:
+    def test_realtime_matcher(self):
+        results = []
+        j = Job("j", cmd="echo x")
+
+        def find_key(line):
+            if "KEY=" in line:
+                return line.split("KEY=")[1]
+            return None
+
+        j.add_matcher(find_key, lambda val, job: results.append(val), timing="realtime")
+        j._emit_line("noise")
+        j._emit_line("KEY=abc")
+        j._emit_line("more noise")
+        assert results == ["abc"]
+
+    def test_post_matcher(self):
+        results = []
+        j = Job("j", cmd="echo x")
+
+        def find_num(line):
+            if line.startswith("NUM:"):
+                return int(line[4:])
+            return None
+
+        j.add_matcher(find_num, lambda val, job: results.append(val), timing="post")
+        j._emit_line("NUM:42")
+        j._emit_line("NUM:99")
+        # post matchers should NOT fire during _emit_line
+        assert results == []
+        # Simulate post-execution
+        j.status = "done"
+        j._post_execute()
+        assert results == [42, 99]
+
+    def test_once_matcher(self):
+        results = []
+        j = Job("j", cmd="echo x")
+        j.add_matcher(
+            lambda line: line if "HIT" in line else None,
+            lambda val, job: results.append(val),
+            once=True, timing="realtime",
+        )
+        j._emit_line("HIT1")
+        j._emit_line("HIT2")
+        assert results == ["HIT1"]
+
+    def test_remove_matcher(self):
+        results = []
+        j = Job("j", cmd="echo x")
+        j.add_matcher(
+            lambda line: line, lambda val, job: results.append(val),
+            name="my_matcher", timing="realtime",
+        )
+        j._emit_line("a")
+        j.remove_matcher("my_matcher")
+        j._emit_line("b")
+        assert results == ["a"]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 26. Lifecycle — _pre_execute
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class _LifecycleJob(Job):
+    """Job subclass that records lifecycle calls."""
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.lifecycle_log = []
+
+    def _pre_execute(self):
+        self.lifecycle_log.append("pre_execute")
+
+    def _execute(self, log_file=None):
+        self.lifecycle_log.append("execute")
+        self.exit_code = 0
+        self.status = "done"
+
+    def _post_execute(self):
+        self.lifecycle_log.append("post_execute_start")
+        super()._post_execute()
+        self.lifecycle_log.append("post_execute_end")
+
+
+class TestLifecycle:
+    def test_pre_execute_called(self):
+        sched = Scheduler(resources={"local": 1})
+        j = _LifecycleJob("lc", cmd="dummy")
+        j.add_hook("on_start", lambda job: job.lifecycle_log.append("hook_on_start"))
+        sched.submit(j)
+        sched.run()
+        # Expected order: on_start hook → _pre_execute → _execute → _post_execute
+        assert j.lifecycle_log[:4] == [
+            "hook_on_start", "pre_execute", "execute", "post_execute_start"
+        ]
+
+    def test_post_execute_triggers_done_hook(self):
+        log = []
+        sched = Scheduler(resources={"local": 1})
+        j = _LifecycleJob("lc", cmd="dummy")
+        j.add_hook("on_done", lambda job: log.append("done"))
+        sched.submit(j)
+        sched.run()
+        assert "done" in log

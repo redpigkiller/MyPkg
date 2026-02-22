@@ -3,201 +3,271 @@
 [![English](https://img.shields.io/badge/Language-English-blue.svg)](scheduler.md)
 [![繁體中文](https://img.shields.io/badge/語言-繁體中文-blue.svg)](scheduler_zh.md)
 
-A lightweight job scheduler based on threading, optimized for IO-bound workloads (e.g., VCS simulations, batch commands).
+## What is the Scheduler?
+
+When you are developing and need to run several time-consuming tasks simultaneously (for example: running dozens of simulation tests, or compiling multiple code projects), if you manually click to run them one by one, or write a simple `for` loop to launch them all at once, your computer might **crash due to instantly exhausting all CPU and memory**.
+
+The **Scheduler** was created exactly to solve this problem!
+Think of it like a smart restaurant manager. It helps you:
+1. **Control the number of customers served simultaneously (Resource Management)**: Ensures your computer doesn't get overloaded.
+2. **Arrange the serving order (Dependencies)**: Ensures the "chopping" task finishes before the "cooking" task begins.
+3. **Broadcast live updates (Status Monitoring)**: Lets you know which tasks are currently running, which are waiting in line, and which have failed.
 
 ---
 
-## Quick Start
+## 5 Core Concepts
 
-```python
-from mypkg import Scheduler, CmdJob, GridJob
+Before using the Scheduler, take a minute to understand these five core mechanisms, and you will have complete mastery over it!
 
-sched = Scheduler(resources={"local": 4, "grid": 8}, log_dir="./logs")
+1. **Resource Management (Resources)**
+   - Your computer's CPU cores, available memory, or nodes in a cluster are limited "resources".
+   - When creating the Scheduler, you tell it: "I have a total of 4 `local` resources."
+   - When you execute a `Job`, you can set how many `local` resources it consumes. The Scheduler will ensure that **at most 4 Jobs are running at the same time**. If a 5th Job arrives, it must wait in line until someone finishes and "returns" their resource before it can start.
 
-compile_job = CmdJob("compile", cmd="vlogan -sverilog top.sv", cwd="/proj/rtl")
-sim_job = CmdJob("sim_01", cmd="vcs -R +tc=01", cwd="/proj/sim",
-                 depends_on=[compile_job], priority=10, timeout=600)
+2. **Dependencies (`depends_on`)**
+   - By configuring `depends_on=[job_A, job_B]`, you can tell the Scheduler: "This task must wait until both 'job_A' and 'job_B' have finished successfully (`DONE`) before it can start."
+   - If a prerequisite task unfortunately fails (`FAILED`), this dependent task will automatically be marked as failed to avoid wasted effort.
 
-sched.submit(compile_job, sim_job)
-sched.run()          # blocking — returns only when finished
-sched.summary()      # Prints the status table
-```
+3. **Priority**
+   - Jobs with higher numbers have higher priority. When resources become available, the Scheduler will dispatch a `priority=100` task before a `priority=0` task.
+
+4. **Timeout**
+   - Some tasks might hang forever due to a bug. You can set `timeout=600` (seconds) for a Job. If it hasn't finished when the time is up, the Scheduler will ruthlessly terminate it (`KILL`) to free up resources.
+
+5. **Interactive Operations (Actions)**
+   - Different tasks might have their own "special skills".
+   - For example, a finished terminal command task (`CmdJob`) might offer an `open_log` action, allowing you to open its log file in your default editor with a single command. Every task can do different things, and you can use `.actions("job_name")` to explore what tricks it knows!
 
 ---
 
-## Scheduler
+## Quick Start Demo
+
+In just 3 steps, let the Scheduler manage your tasks for you!
 
 ```python
-Scheduler(
-    resources={"local": 4, "grid": 8},
-    log_dir="./logs",
-    poll_interval=0.5,
+from mypkg import Scheduler, CmdJob
+
+# Step 1: Create a Scheduler
+# Tell it: You can only use a maximum of 4 resources named "local" at a time
+sched = Scheduler(resources={"local": 4}, log_dir="./logs")
+
+# Step 2: Create Jobs
+# compile_job is a terminal command task
+compile_job = CmdJob("compile", cmd="gcc main.c -o main")
+
+# sim_job is also a command task, but it says: "I must wait for compile_job to finish first!"
+sim_job = CmdJob(
+    name="run_sim", 
+    cmd="./main", 
+    depends_on=[compile_job],  # Set dependency
+    timeout=60                 # Kill it if it takes longer than 60 seconds
 )
+
+# Step 3: Hand the jobs over to the Scheduler, and tell it to start working!
+sched.submit(compile_job, sim_job)
+sched.run()          # This command blocks, waiting until ALL tasks are finished
+
+sched.summary()      # After it finishes, print a beautifully formatted summary report!
 ```
-
-### Basic Controls
-
-| Method | Description |
-|--------|-------------|
-| `submit(*jobs)` | Add jobs to the queue |
-| `run()` | **Blocking** — Wait until all jobs complete |
-| `start()` | **Non-blocking** — Run in background thread |
-| `wait()` | Wait for `start()` to complete |
-| `stop()` | Stop scheduling (finishes ongoing jobs) |
-
-### Interactive Controls
-
-| Method | Description |
-|--------|-------------|
-| `get(name)` | Get a Job object |
-| `follow(name, n=20)` | Attach to a job's output stream |
-| `cancel(name)` | Cancel a pending job |
-| `kill(name)` | Terminate a running job |
-| `set_priority(name, n)` | Change the priority of a pending job |
-| `actions(name)` | List job-specific actions |
-| `action(name, act)` | Execute a job's specific action |
-
-### Reporting & Filtering
-
-| Method / Property | Description |
-|-------------------|-------------|
-| `status()` | Lightweight status table |
-| `summary()` | Full status table (includes exit code, duration) |
-| `jobs` | All jobs |
-| `pending` | Unstarted jobs |
-| `running` | Executing jobs |
-| `done` | Completed jobs |
-| `failed` | Failed + canceled jobs |
 
 ---
 
-## CmdJob — Local Commands
+## How to Control the Scheduler (API Details)
+
+Here is how you can operate the `Scheduler` object. Every command gives you full control.
+
+### 📅 Adding and Starting
+* `submit(*jobs)`: Tosses several Jobs into the queue.
+* `run()`: **Blocks your program**. It starts dispatching tasks and waits until every single one is finished (or failed) before moving to the next line of your code. Ideal for scripts.
+* `start()`: **Does not block your program**. It opens an invisible worker (Thread) in the background to dispatch tasks, allowing your code to continue executing immediately. Ideal for GUI applications.
+* `wait()`: If you used `start()`, but at some point you decide you want to wait for everything to finish, call `wait()`.
+
+### ⏸️ Pausing, Resuming and Stopping
+* `pause()`: Pause the scheduler. **Currently running Jobs will finish**, but no new tasks will be dispatched.
+* `resume()`: Resume the scheduler. Tasks queued during the pause will start being dispatched again.
+* `stop()`: Tells the Scheduler: "Stop dispatching new tasks!". However, it is very polite and will wait for any **currently running** Jobs to finish properly before it actually shuts down.
+
+### 🕹️ Single Job Interaction
+When you want to do something to a specific task (`"job_name"`) in the queue:
+* `get("name")`: Retrieves that specific `Job` object for you to manipulate.
+* `follow("name", n=20)`: Like a live stream! Prints the last 20 lines of output from this task directly to your Terminal in real-time.
+* `cancel("name")`: Pulls a task that is **still queuing** out of the line so it won't run.
+* `kill("name")`: Forcefully terminates a task that is **currently running**.
+* `set_priority("name", n)`: This task is urgent, let it cut the line! Increases its priority.
+* `actions("name")`: Asks the task: "What special moves do you know?". It returns a list of special operation names it can perform.
+* `action("name", "action_name")`: Directly commands this task to use its special move (e.g., `"open_log"`).
+
+### 📊 Status and Filtering
+Want to know where everyone is at right now?
+* `status()`: Prints a concise current status table in the terminal (who is waiting, who is running).
+* `summary()`: Prints the final billing summary! (Includes execution time and success/failure status for all tasks).
+* You can also directly inspect the rosters (returns a list of Jobs):
+  * `sched.pending`: The list of jobs still waiting in line.
+  * `sched.running`: The list of jobs currently executing.
+  * `sched.done`: The list of jobs that finished successfully.
+  * `sched.failed`: The list of jobs that failed.
+  * `sched.cancelled`: The list of jobs that were cancelled.
+
+---
+
+## Built-in Job Types
+
+### CmdJob (Local Terminal Command)
+Designed specifically to execute command-line instructions on your computer.
 
 ```python
 CmdJob(
     name="sim_01",
-    cmd="python run.py --tc 01",
-    cwd="/proj/sim",                        # Working directory (optional)
-    env={"SEED": "42"},                     # Extra environment variables (optional)
-    priority=10,                            # Higher is more prioritized (default 0)
-    depends_on=[compile_job],               # Dependencies (optional)
-    resources={"local": 1},                 # Default local=1
-    timeout=600,                            # Auto-kill upon timeout in seconds (optional)
+    cmd="python run.py --tc 01",            # The command you would type in the terminal
+    cwd="/proj/sim",                        # [Optional] Which folder should it run in?
+    env={"SEED": "42"},                     # [Optional] Any extra environment variables?
+    priority=10,                            # Higher numbers run first
+    resources={"local": 1},                 # [Optional] It consumes 1 local resource (Default is 1)
 )
-```
-
-### Output Streaming
-
-```python
-job.on_output(print)          # Real-time callback
-job.remove_output(cb)         # Remove callback
-job.tail(20)                  # Last 20 lines
-job.output_lines              # Full history
-```
-
-### CmdJob Actions
-
-Automatically provided after completion:
-- `open_log` — Cross-platform open log file
-- `open_cwd` — Cross-platform open working directory
-
-```python
-sched.actions("sim_01")              # List actions
-sched.action("sim_01", "open_log")   # Execute
 ```
 
 ---
 
-## GridJob — SGE Grid (qsub/qstat/qdel)
+## Hooks & Matchers — Lifecycle Events and Log Analysis
+
+### Hooks — Lifecycle Event Callbacks
+
+You can attach callbacks to various lifecycle stages of a Job, so it automatically notifies you when specific events occur.
+
+| Hook Event | When it fires | Callback Signature |
+|-----------|---------|---------------|
+| `on_start` | Before the job starts executing | `callback(job)` |
+| `on_done` | After the job completes successfully | `callback(job)` |
+| `on_fail` | After the job fails | `callback(job)` |
+| `on_cancel` | When the job is cancelled | `callback(job)` |
+| `on_output` | Each time a line of stdout is produced | `callback(line, job)` |
 
 ```python
-GridJob(
-    name="grid_sim",
-    cmd="vcs -R +tc=01",
-    cwd="/proj/sim",
-    submit_opts="-q regression -pe smp 2",  # qsub options
-    priority=5,
-    depends_on=[compile_job],
-    resources={"grid": 1},                  # Default grid=1
-    poll_interval=10.0,                     # qstat polling interval (seconds)
-)
+job = CmdJob("sim", cmd="python run.py")
+
+# Notify on completion
+job.add_hook("on_done", lambda j: print(f"✅ {j.name} finished!"))
+
+# Alert on failure
+job.add_hook("on_fail", lambda j: print(f"❌ {j.name} failed! exit_code={j.exit_code}"))
+
+# Monitor output in real-time (fires for every line)
+job.add_hook("on_output", lambda line, j: print(f"[{j.name}] {line}"))
+
+# Done listening? Remove the hook
+job.remove_hook("on_output", my_callback)
 ```
 
-### Workflow
+**Reading Output History**
+```python
+job.tail(20)          # Grab the last 20 lines of output
+job.output_lines      # Get the full output history (list[str])
+```
 
-1. Auto-generates shell script → submits via `qsub`
-2. Periodically checks status using `qstat -j <id>`
-3. Streams log file contents as output
-4. Cleans up temp scripts upon completion
+### Matchers — Smart Log Analysis
 
-### GridJob Overrides
+Matchers let you define a "match function" that automatically triggers a callback when output matching your criteria appears.
 
-| Method | Purpose |
+```python
+import re
+
+# Detect ERROR in output
+def find_error(line):
+    m = re.search(r"ERROR: (.+)", line)
+    return m.group(1) if m else None  # Return truthy → triggers callback
+
+def on_error(matched_text, job):
+    print(f"⚠️ Job {job.name} encountered an error: {matched_text}")
+
+job.add_matcher(find_error, on_error, name="error_finder", timing="realtime")
+```
+
+| Parameter | Description |
 |------|------|
-| `kill()` | `qdel <grid_id>` |
-| `actions()` | `grid_status` — queries qstat |
-| `_parse_grid_id(output)` | Parses the job ID returned by qsub |
-| `_check_grid_status()` | Parses qstat status |
-
-### Custom Grid Systems
-
-Inherit `GridJob` and override:
-
-```python
-class SlurmJob(GridJob):
-    default_resources = {"slurm": 1}
-
-    def __init__(self, name, cmd, **kwargs):
-        super().__init__(name, cmd,
-                         submit_cmd="sbatch",
-                         kill_cmd="scancel",
-                         status_cmd="squeue",
-                         **kwargs)
-
-    def _parse_grid_id(self, output):
-        # Slurm format: "Submitted batch job 12345"
-        m = re.search(r"Submitted batch job (\d+)", output)
-        return m.group(1) if m else None
-```
+| `timing="realtime"` | Match **immediately** as each output line is produced |
+| `timing="post"` | Scan all output **once** after the job finishes |
+| `once=True` | Automatically remove the matcher after the first match |
 
 ---
 
-## Interactive Examples
+## Advanced: Building Your Custom Job
 
-```python
-sched = Scheduler(resources={"local": 4, "grid": 8}, log_dir="./logs")
-# ... submit jobs ...
-sched.start()
+Sometimes you might not just want to run terminal commands. Perhaps you want the Scheduler to queue up a **Python function** you wrote.
 
-sched.status()                     # View current status
-sched.follow("sim_01")             # View output in real-time
-sched.cancel("sim_03")             # Cancel pending
-sched.kill("sim_02")               # Kill running
-sched.set_priority("sim_04", 100)  # Increase priority
-sched.actions("sim_01")            # View available actions
+Simply inherit from the `Job` base template and rewrite the execution logic to build your very own, specialized worker!
 
-sched.wait()
-sched.summary()
-
-# Filtering
-for j in sched.failed:
-    print(f"FAIL: {j.name}  exit={j.exit_code}")
+**Job Lifecycle**:
+```
+on_start hooks → _pre_execute() → _execute() → _post_execute() → on_done / on_fail / on_cancel hooks
 ```
 
----
-
-## GUI Integration
+### Full Example: Turning a Python Function into a Job
 
 ```python
-import queue
+import time
+from mypkg.scheduler.job import Job, DONE, FAILED
 
-gui_queue = queue.Queue()
-job.on_output(lambda line: gui_queue.put(("output", job.name, line)))
+class PythonJob(Job):
+    """Turns any Python function into a Job that the Scheduler can queue"""
 
-sched.start()   # non-blocking
+    def __init__(self, name, func, *args, **kwargs):
+        # 1. Remember to call the parent (super) to set up infrastructure
+        # 'cmd' can be any descriptive string
+        super().__init__(name, cmd="[Python Callable]")
+        
+        # Save the arguments for later
+        self.func = func
+        self.args = args
+        self.kwargs = kwargs
 
-# In GUI main loop:
-while not gui_queue.empty():
-    msg_type, name, data = gui_queue.get()
-    text_widget.insert(END, data + "\n")
+        # ⭐️ Key concept: Equip your Custom Job with a "Special Move (Action)"
+        self.register_action("say_hi", "A special move that says Hi", lambda: print(f"Hi! I am the {name} job"))
+
+    def _pre_execute(self):
+        """[Optional] Called before _execute(), good for initialization"""
+        self._emit_line("Running pre-execution setup...")
+
+    def _execute(self, log_file=None):
+        """2. This is the core logic. The Scheduler will call this when it's your turn"""
+        try:
+            self._emit_line(f"Preparing to execute function: {self.func.__name__}")
+            
+            # Actually execute your Python code
+            result = self.func(*self.args, **self.kwargs)
+            
+            self._emit_line(f"Execution successful! The result is {result}")
+            
+            # 3. Very important: You must honestly report your final status
+            self.exit_code = 0          # 0 means success
+            self.status = DONE          # Mark it as successfully finished
+            
+        except Exception as e:
+            # Handling errors
+            self._emit_line(f"Oops, the program crashed: {e}")
+            self.exit_code = 1          # Non-zero means failure
+            self.status = FAILED        # Mark it as failed
+
+
+# ================================
+# 🎉 Let's test it out!
+# ================================
+def compute_heavy_math(x, y):
+    time.sleep(2) # Pretend this calculation takes a long time
+    return x ** y
+
+# Put it into the PythonJob you just built
+my_job = PythonJob("math_task", compute_heavy_math, 2, 10)
+
+# Attach a completion notification
+my_job.add_hook("on_done", lambda j: print(f"🎉 {j.name} computation complete!"))
+
+# Throw it into the Scheduler
+sched = Scheduler(resources={"local": 2})
+sched.submit(my_job)
+sched.run()
+
+# Unleash this Job's special move! (It will print Hi)
+sched.action("math_task", "say_hi")
 ```
+
+Congratulations! You now fully understand all the secrets of the Scheduler, from its lowest-level concepts to advanced extensions!

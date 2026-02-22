@@ -13,7 +13,7 @@
 |------|------|
 | `MapBV` | Bit-vector mapping and access |
 | `NumBV` | Numeric bit-vector arithmetic |
-| `Scheduler` | Job scheduling (CmdJob / GridJob) |
+| `Scheduler` | Job scheduling (CmdJob) |
 
 ---
 

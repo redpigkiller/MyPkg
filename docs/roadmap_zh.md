@@ -13,7 +13,7 @@
 |------|------|
 | `MapBV` | Bit-vector 映射與存取 |
 | `NumBV` | 數值型 bit-vector 運算 |
-| `Scheduler` | Job 排程 (CmdJob / GridJob) |
+| `Scheduler` | Job 排程 (CmdJob) |
 
 ---
 
