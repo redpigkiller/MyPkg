@@ -4,6 +4,14 @@ from mypkg.data_types.mapbv import MapBV, MapBVSlice, MapBVExpr, StructSegment
 from mypkg.scheduler import Scheduler, Job, CmdJob
 
 try:
+    from mypkg.cfg import CFG, BasicBlock, NaturalLoop
+    from mypkg.fsm import FSMGraph
+    from mypkg.mcu import LivenessAnalysis, eliminate_dead_blocks
+    HAS_CFG = True
+except ImportError:
+    HAS_CFG = False
+
+try:
     from mypkg.excel_extractor import (
         match_template,
         Block, Row, Col, EmptyRow, EmptyCol, Group,
@@ -28,11 +36,18 @@ except ImportError:
     HAS_MATH = False
 
 __all__ = [
+    # data types
     "MapBV", "MapBVSlice", "MapBVExpr", "StructSegment",
     "NumBV",
     "NumBVArray",
+    # scheduler
     "Scheduler", "Job", "CmdJob",
+    # excel
     "match_template",
     "Block", "Row", "Col", "EmptyRow", "EmptyCol", "Group",
     "Types", "MatchOptions", "MatchTolerance", "MatchResult", "NodeResult",
+    # cfg / fsm / mcu
+    "CFG", "BasicBlock", "NaturalLoop",
+    "FSMGraph",
+    "LivenessAnalysis", "eliminate_dead_blocks",
 ]
