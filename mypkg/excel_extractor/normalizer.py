@@ -29,6 +29,15 @@ class InternalCell:
     is_merged: bool = False
 
 
+# Module-level sentinel used when normalising merged cells that have no
+# real openpyxl cell object (avoids creating a class inside a loop).
+@dataclass
+class _MergedCellProxy:
+    """Lightweight stand-in for an openpyxl cell inside a merge range."""
+    value: Any
+    is_date: bool = False
+
+
 class InternalGrid:
     """A 2-D array of InternalCell objects with 0-based coordinate access."""
 
@@ -71,12 +80,33 @@ class InternalGrid:
             result.append(cell)
         return result
 
-    def is_row_all_empty(self, row: int, start_col: int, num_cols: int) -> bool:
-        """Return True if every cell in the given row slice is None."""
+    def is_row_all_empty(
+        self,
+        row: int,
+        start_col: int,
+        num_cols: int,
+        *,
+        allow_whitespace: bool = True,
+    ) -> bool:
+        """Return True if every cell in the given row slice is considered empty.
+
+        Parameters
+        ----------
+        allow_whitespace : if True (default), cells whose value is an empty or
+            whitespace-only string also count as empty (consistent with
+            EmptyRow(allow_whitespace=True)).  If False, only None (truly
+            absent) cells are considered empty.
+        """
         for c in range(start_col, start_col + num_cols):
             cell = self.get_cell(row, c)
-            if cell is not None and cell.value is not None:
-                return False
+            if cell is None:
+                continue
+            if allow_whitespace:
+                if cell.value is not None and cell.value.strip() != "":
+                    return False
+            else:
+                if cell.value is not None:
+                    return False
         return True
 
 
@@ -173,12 +203,8 @@ def load_and_normalize_excel(
 
             if is_merged_cell:
                 master_val = merge_map.get((r1, c1))
-                # Create a fake cell-like object to normalise
-                class _FakeCell:
-                    value = master_val
-                    is_date = False
-                fake = _FakeCell()
-                norm_val, orig_val = _normalise_value(fake, False)
+                proxy = _MergedCellProxy(value=master_val)
+                norm_val, orig_val = _normalise_value(proxy, False)
                 internal = InternalCell(value=norm_val, original_value=orig_val, is_merged=True)
             else:
                 try:

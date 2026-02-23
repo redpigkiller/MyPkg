@@ -243,3 +243,8 @@ class Block(TemplateNode):
                     f"Block(orientation='horizontal') cannot contain Row/EmptyRow nodes, "
                     f"got {type(child).__name__}"
                 )
+
+    def __repr__(self) -> str:
+        id_part = f"{self.block_id!r}, " if self.block_id else ""
+        return f"Block({id_part}{self.orientation}, {len(self.children)} children)"
+

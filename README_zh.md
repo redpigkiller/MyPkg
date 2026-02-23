@@ -15,6 +15,7 @@ python -m venv venv
 # Windows: venv\Scripts\activate | Mac/Linux: source venv/bin/activate
 pip install -e .          # 僅核心功能
 pip install -e .[math]    # 完整功能 (包含 NumBV 與 NumBVArray)
+pip install -e .[excel]   # Excel Extractor（加入 openpyxl）
 pytest -q                 # 執行測試
 ```
 
@@ -92,6 +93,35 @@ with tracker.stage("Process"): # Context Mode (自動資源管理)
     tracker.error("Missing input file")    # 累積錯誤而不中斷程式
 
 tracker.summary()                    # 自動印出失敗報告
+```
+
+---
+
+## Excel 自動化
+
+### [Excel Extractor](docs/excel_extractor/excel_extractor_zh.md) — 以樣板為基礎的資料擷取
+
+描述資料的「形狀」，引擎自動找出它在工作表上的位置。支援合併儲存格、重複列、多樣板組合及近似比對除錯。
+
+```python
+from mypkg.excel_extractor import match_template, Block, Row, Types
+
+template = Block(
+    Row(["部門", "姓名", "月薪"]),
+    Row([Types.STR, Types.STR, Types.INT], repeat="+", node_id="data"),
+    block_id="salary_table",
+)
+
+output = match_template("report.xlsx", template)
+result = output.results[0]
+
+# 每個比對列的精確工作表座標
+for node in result.data_nodes():
+    print(node.grid_row, node.cells)  # → 絕對行號 + [部門, 姓名, 月薪]
+
+# 以 ID 找到特定列，之後可用座標寫回 Excel
+third = result.find_node("data", repeat_index=2)
+print(third.grid_row, third.grid_col)  # → 工作表上的精確 (row, col)
 ```
 
 ---

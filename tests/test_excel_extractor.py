@@ -14,7 +14,7 @@ from mypkg.excel_extractor.template import (
 )
 from mypkg.excel_extractor.result import MatchOptions, MatchOutput, MatchResult, NearMissHint, NodeResult
 from mypkg.excel_extractor.normalizer import InternalCell, InternalGrid
-from mypkg.excel_extractor.matcher import TemplateMatcher
+from mypkg.excel_extractor.matcher import TemplateMatcher, excel_range
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +130,35 @@ class TestTypes(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# 1b. Types.BLANK
+# ---------------------------------------------------------------------------
+
+class TestTypesBlank(unittest.TestCase):
+
+    def test_blank_matches_none(self):
+        self.assertTrue(Types.BLANK.matches(None, False))
+
+    def test_blank_matches_empty_string(self):
+        self.assertTrue(Types.BLANK.matches("", False))
+
+    def test_blank_matches_whitespace(self):
+        self.assertTrue(Types.BLANK.matches("   ", False))
+
+    def test_blank_does_not_match_nonempty(self):
+        self.assertFalse(Types.BLANK.matches("hello", False))
+        self.assertFalse(Types.BLANK.matches("0", False))
+
+    def test_empty_or_space_equivalent_to_blank(self):
+        combined = Types.EMPTY | Types.SPACE
+        for val in (None, "", "  "):
+            self.assertEqual(
+                Types.BLANK.matches(val, False),
+                combined.matches(val, False),
+                msg=f"Mismatch for value={val!r}",
+            )
+
+
+# ---------------------------------------------------------------------------
 # 2. repeat spec parsing
 # ---------------------------------------------------------------------------
 
@@ -188,6 +217,11 @@ class TestBlockValidation(unittest.TestCase):
         b = Block(Col(["a"]), orientation="horizontal")
         self.assertEqual(b.orientation, "horizontal")
 
+    def test_block_repr(self):
+        b = Block(Row(["a"]), block_id="my_block")
+        self.assertIn("my_block", repr(b))
+        self.assertIn("vertical", repr(b))
+
 
 # ---------------------------------------------------------------------------
 # 4. InternalGrid helpers
@@ -220,6 +254,18 @@ class TestInternalGrid(unittest.TestCase):
         self.assertTrue(self.grid.is_row_all_empty(3, 0, 3))
         self.assertFalse(self.grid.is_row_all_empty(0, 0, 3))
 
+    def test_is_row_all_empty_strict_mode(self):
+        """allow_whitespace=False → only None counts as empty."""
+        grid = make_grid([[None, "", None]])
+        # allow_whitespace=True (default): None and "" → empty  → True
+        self.assertTrue(grid.is_row_all_empty(0, 0, 3, allow_whitespace=True))
+        # allow_whitespace=False: "" is NOT empty → False
+        self.assertFalse(grid.is_row_all_empty(0, 0, 3, allow_whitespace=False))
+
+    def test_is_row_all_empty_strict_all_none(self):
+        grid = make_grid([[None, None, None]])
+        self.assertTrue(grid.is_row_all_empty(0, 0, 3, allow_whitespace=False))
+
 
 # ---------------------------------------------------------------------------
 # 5. Matcher — vertical (simple table)
@@ -243,7 +289,6 @@ class TestMatcherVertical(unittest.TestCase):
         )
         result = self.matcher._try_match_block_vertical(0, 0, block)
         self.assertIsNotNone(result)
-        self.assertEqual(result.score, 1.0)
         data = result.data_nodes()
         # 1 header + 3 data rows
         self.assertEqual(len(data), 4)
@@ -288,15 +333,6 @@ class TestMatcherGroup(unittest.TestCase):
 
     def setUp(self):
         self.grid = make_grid([
-            [Types.ANY,      "姓名",  "月薪"],   # header — note: ANY won't work as data, just testing
-            [('M', "IT"),   "Alice",  1000],
-            [('M', "IT"),   "Bob",    2000],
-            [None, None, None],                  # empty row
-            [('M', "HR"),   "Carol",  3000],
-            [None, None, None],                  # empty row
-        ])
-        # Replace Types.ANY cell in row0 col0 with actual string
-        self.grid = make_grid([
             ["*",            "姓名",  "月薪"],
             [('M', "IT"),   "Alice",  1000],
             [('M', "IT"),   "Bob",    2000],
@@ -307,8 +343,6 @@ class TestMatcherGroup(unittest.TestCase):
         self.matcher = make_matcher(self.grid)
 
     def test_group_with_empty_row(self):
-        # The empty row between IT and HR group is declared explicitly via
-        # EmptyRow(repeat="?"), so strict matching succeeds with score 1.0.
         block = Block(
             Row([Types.ANY, "姓名", "月薪"]),
             Group(
@@ -319,7 +353,6 @@ class TestMatcherGroup(unittest.TestCase):
         )
         result = self.matcher._try_match_block_vertical(0, 0, block)
         self.assertIsNotNone(result)
-        self.assertEqual(result.score, 1.0)
         # Verify all 4 data rows captured (header + IT×2 + HR×1)
         data = [n for n in result.matched_nodes if n.node_type == "Row"]
         self.assertEqual(len(data), 4)
@@ -362,10 +395,8 @@ class TestMatcherStrictAndNearMiss(unittest.TestCase):
         matcher = make_matcher(self.grid)
         result = matcher._try_match_block_vertical(0, 0, block)
         self.assertIsNotNone(result)
-        self.assertEqual(result.score, 1.0)
 
     def test_near_miss_hint_emitted(self):
-        # Header matches but data rows fail (wrong header expected)
         block = Block(
             Row(["部門", "姓名", "月薪"]),
             Row([Types.STR, Types.STR, Types.INT], repeat=3),
@@ -374,13 +405,26 @@ class TestMatcherStrictAndNearMiss(unittest.TestCase):
         opts = MatchOptions(near_miss_threshold=0.3)
         matcher = make_matcher(self.grid, opts)
         output = matcher.scan_for_blocks([block])
-        # The block at anchor (0,0) partially matches (header ok, then fails)
         hints = [h for h in output.near_misses if h.block_id == "salary_table"]
         self.assertTrue(len(hints) > 0)
-        # matched_ratio should be 0.5 (1 of 2 top-level children succeeded)
         best = max(hints, key=lambda h: h.matched_ratio)
         self.assertGreater(best.matched_ratio, 0.0)
         self.assertLess(best.matched_ratio, 1.0)
+
+    def test_near_miss_hint_has_expected_and_got(self):
+        """NearMissHint should carry expected/got fields for the first failure."""
+        block = Block(
+            Row(["部門", "姓名", "月薪"]),
+            Row([Types.STR, Types.STR, Types.INT], repeat=3),
+            block_id="salary_table",
+        )
+        opts = MatchOptions(near_miss_threshold=0.3)
+        matcher = make_matcher(self.grid, opts)
+        output = matcher.scan_for_blocks([block])
+        hints = [h for h in output.near_misses if h.block_id == "salary_table"]
+        # At least one hint should have non-None expected/got
+        with_info = [h for h in hints if h.expected is not None or h.got is not None]
+        self.assertTrue(len(with_info) > 0, "Expected at least one hint with expected/got info")
 
     def test_near_miss_not_emitted_when_threshold_none(self):
         block = Block(
@@ -400,10 +444,6 @@ class TestMatcherStrictAndNearMiss(unittest.TestCase):
 class TestMatcherHorizontal(unittest.TestCase):
 
     def setUp(self):
-        # Layout: rows = [label_row, data_row]
-        # col 0: label col  ["月份", "目標"]
-        # col 1: Jan data   ["Jan", "100"]
-        # col 2: Feb data   ["Feb", "200"]
         self.grid = make_grid([
             ["月份", "Jan", "Feb"],
             ["目標",  100,   200],
@@ -455,12 +495,6 @@ class TestScanReturnModes(unittest.TestCase):
         output = matcher.scan_for_blocks([self._make_block()])
         self.assertEqual(len(output.results), 1)
 
-    def test_return_best(self):
-        opts = MatchOptions(return_mode="BEST")
-        matcher = make_matcher(self.grid, opts)
-        output = matcher.scan_for_blocks([self._make_block()])
-        self.assertEqual(len(output.results), 1)
-
 
 # ---------------------------------------------------------------------------
 # 10. MatchResult helpers
@@ -480,7 +514,6 @@ class TestMatchResult(unittest.TestCase):
             anchor=(0, 0),
             orientation="vertical",
             matched_nodes=nodes,
-            score=0.9,
         )
 
     def test_data_nodes_excludes_empty(self):
@@ -492,7 +525,407 @@ class TestMatchResult(unittest.TestCase):
         d = r.to_dict()
         self.assertIn("block_id", d)
         self.assertIn("matched_nodes", d)
-        self.assertEqual(d["score"], 0.9)
+        self.assertNotIn("score", d)  # score has been removed
+
+    def test_match_result_repr(self):
+        r = self._make_result()
+        s = repr(r)
+        self.assertIn("test", s)
+        self.assertIn("vertical", s)
+
+    def test_node_result_repr(self):
+        n = NodeResult("Row", "data", 0, [1, 2, 3], grid_row=5, grid_col=0)
+        s = repr(n)
+        self.assertIn("data", s)
+        self.assertIn("Row", s)
+        self.assertIn("5,0", s)
+
+
+# ---------------------------------------------------------------------------
+# 11. NodeResult grid coordinates
+# ---------------------------------------------------------------------------
+
+class TestNodeResultCoordinates(unittest.TestCase):
+
+    def test_vertical_row_coordinates(self):
+        """Each Row NodeResult should carry the correct absolute grid row/col."""
+        grid = make_grid([
+            ["部門", "姓名"],
+            ["IT",   "Alice"],
+            ["HR",   "Bob"],
+        ])
+        block = Block(
+            Row(["部門", "姓名"], node_id="header"),
+            Row([Types.STR, Types.STR], repeat="+", node_id="data"),
+        )
+        matcher = make_matcher(grid)
+        result = matcher._try_match_block_vertical(0, 0, block)
+        self.assertIsNotNone(result)
+
+        header = result.find_node("header", 0)
+        self.assertIsNotNone(header)
+        self.assertEqual(header.grid_row, 0)
+        self.assertEqual(header.grid_col, 0)
+
+        data0 = result.find_node("data", 0)
+        self.assertIsNotNone(data0)
+        self.assertEqual(data0.grid_row, 1)
+        self.assertEqual(data0.grid_col, 0)
+
+        data1 = result.find_node("data", 1)
+        self.assertIsNotNone(data1)
+        self.assertEqual(data1.grid_row, 2)
+        self.assertEqual(data1.grid_col, 0)
+
+    def test_vertical_block_offset(self):
+        """Grid anchored at (row=2, col=1) should propagate offsets correctly."""
+        grid = make_grid([
+            [None, None,    None],
+            [None, None,    None],
+            [None, "Header", "Val"],
+            [None, "IT",     "100"],
+        ])
+        block = Block(
+            Row(["Header", "Val"], node_id="h"),
+            Row([Types.STR, Types.INT], node_id="d"),
+        )
+        matcher = make_matcher(grid)
+        result = matcher._try_match_block_vertical(2, 1, block)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.find_node("h").grid_row, 2)
+        self.assertEqual(result.find_node("h").grid_col, 1)
+        self.assertEqual(result.find_node("d").grid_row, 3)
+        self.assertEqual(result.find_node("d").grid_col, 1)
+
+    def test_horizontal_col_coordinates(self):
+        """Each Col NodeResult should carry the correct absolute grid col."""
+        grid = make_grid([
+            ["Label", "Jan", "Feb"],
+            ["Target", 100,   200],
+        ])
+        block = Block(
+            Col(["Label", "Target"], node_id="label_col"),
+            Col([Types.STR, Types.INT], repeat="+", node_id="data_col"),
+            orientation="horizontal",
+        )
+        matcher = make_matcher(grid)
+        result = matcher._try_match_block_horizontal(0, 0, block)
+        self.assertIsNotNone(result)
+
+        label = result.find_node("label_col", 0)
+        self.assertEqual(label.grid_col, 0)
+        self.assertEqual(label.grid_row, 0)
+
+        data0 = result.find_node("data_col", 0)
+        self.assertEqual(data0.grid_col, 1)
+
+        data1 = result.find_node("data_col", 1)
+        self.assertEqual(data1.grid_col, 2)
+
+    def test_empty_row_carries_coordinates(self):
+        """EmptyRow nodes should also carry grid_row / grid_col."""
+        grid = make_grid([
+            ["H"],
+            [None],
+            ["D"],
+        ])
+        block = Block(
+            Row(["H"], node_id="h"),
+            EmptyRow(repeat=1, node_id="sep"),
+            Row([Types.STR], node_id="d"),
+        )
+        matcher = make_matcher(grid)
+        result = matcher._try_match_block_vertical(0, 0, block)
+        self.assertIsNotNone(result)
+        sep = result.find_node("sep", 0)
+        self.assertIsNotNone(sep)
+        self.assertEqual(sep.grid_row, 1)
+
+
+# ---------------------------------------------------------------------------
+# 12. MatchResult.bounding_box
+# ---------------------------------------------------------------------------
+
+class TestMatchResultBoundingBox(unittest.TestCase):
+
+    def test_vertical_bounding_box(self):
+        """3-row, 2-col table → box should be (0,0,2,1)."""
+        grid = make_grid([
+            ["名前", "点数"],
+            ["Alice",  90],
+            ["Bob",    85],
+        ])
+        block = Block(
+            Row(["名前", "点数"]),
+            Row([Types.STR, Types.INT], repeat="+"),
+        )
+        matcher = make_matcher(grid)
+        result = matcher._try_match_block_vertical(0, 0, block)
+        self.assertIsNotNone(result)
+        r1, c1, r2, c2 = result.bounding_box
+        self.assertEqual(r1, 0)
+        self.assertEqual(c1, 0)
+        self.assertEqual(r2, 2)   # last data row
+        self.assertEqual(c2, 1)   # rightmost col (0-based, 2 cols → index 1)
+
+    def test_anchor_offset_bounding_box(self):
+        """Block anchored at (1, 2) with 2 rows → box should be (1,2,2,3)."""
+        grid = make_grid([
+            [None, None, None, None],
+            [None, None, "A",  "B"],
+            [None, None, "X",  "Y"],
+        ])
+        block = Block(
+            Row(["A", "B"]),
+            Row([Types.STR, Types.STR]),
+        )
+        matcher = make_matcher(grid)
+        result = matcher._try_match_block_vertical(1, 2, block)
+        self.assertIsNotNone(result)
+        r1, c1, r2, c2 = result.bounding_box
+        self.assertEqual((r1, c1), (1, 2))
+        self.assertEqual(r2, 2)
+        self.assertEqual(c2, 3)
+
+
+# ---------------------------------------------------------------------------
+# 13. MatchResult.find_node
+# ---------------------------------------------------------------------------
+
+class TestFindNode(unittest.TestCase):
+
+    def _make_result(self):
+        grid = make_grid([
+            ["Header",  "Val"],
+            ["Row1",    10],
+            ["Row2",    20],
+        ])
+        block = Block(
+            Row(["Header", "Val"], node_id="head"),
+            Row([Types.STR, Types.INT], repeat="+", node_id="data"),
+        )
+        return make_matcher(grid)._try_match_block_vertical(0, 0, block)
+
+    def test_find_header(self):
+        result = self._make_result()
+        node = result.find_node("head")
+        self.assertIsNotNone(node)
+        self.assertEqual(node.cells, ["Header", "Val"])
+
+    def test_find_data_by_repeat_index(self):
+        result = self._make_result()
+        d0 = result.find_node("data", 0)
+        d1 = result.find_node("data", 1)
+        self.assertEqual(d0.cells, ["Row1", 10])
+        self.assertEqual(d1.cells, ["Row2", 20])
+
+    def test_find_nonexistent_returns_none(self):
+        result = self._make_result()
+        self.assertIsNone(result.find_node("no_such_id"))
+
+    def test_find_nonexistent_repeat_returns_none(self):
+        result = self._make_result()
+        self.assertIsNone(result.find_node("data", 99))
+
+
+# ---------------------------------------------------------------------------
+# 13b. MatchResult.find_nodes
+# ---------------------------------------------------------------------------
+
+class TestFindNodes(unittest.TestCase):
+
+    def _make_result(self):
+        grid = make_grid([
+            ["Header",  "Val"],
+            ["Row1",    10],
+            ["Row2",    20],
+            ["Row3",    30],
+        ])
+        block = Block(
+            Row(["Header", "Val"], node_id="head"),
+            Row([Types.STR, Types.INT], repeat="+", node_id="data"),
+        )
+        return make_matcher(grid)._try_match_block_vertical(0, 0, block)
+
+    def test_find_nodes_returns_all(self):
+        result = self._make_result()
+        nodes = result.find_nodes("data")
+        self.assertEqual(len(nodes), 3)
+
+    def test_find_nodes_sorted_by_repeat_index(self):
+        result = self._make_result()
+        nodes = result.find_nodes("data")
+        indices = [n.repeat_index for n in nodes]
+        self.assertEqual(indices, sorted(indices))
+
+    def test_find_nodes_values_correct(self):
+        result = self._make_result()
+        nodes = result.find_nodes("data")
+        self.assertEqual(nodes[0].cells, ["Row1", 10])
+        self.assertEqual(nodes[2].cells, ["Row3", 30])
+
+    def test_find_nodes_nonexistent_returns_empty(self):
+        result = self._make_result()
+        self.assertEqual(result.find_nodes("no_such_id"), [])
+
+    def test_find_nodes_header_returns_one(self):
+        result = self._make_result()
+        nodes = result.find_nodes("head")
+        self.assertEqual(len(nodes), 1)
+        self.assertEqual(nodes[0].cells, ["Header", "Val"])
+
+
+# ---------------------------------------------------------------------------
+# 14. Consumption mask
+# ---------------------------------------------------------------------------
+
+class TestConsumptionMask(unittest.TestCase):
+    """Verify that a large matched block prevents smaller templates from
+    claiming the same region when consume_matched_regions=True."""
+
+    def setUp(self):
+        self.grid = make_grid([
+            ["Title", "Dept", "Name"],
+            ["Hdr",   "IT",   "Alice"],
+            ["Hdr",   "HR",   "Bob"],
+        ])
+
+    def _large_block(self):
+        return Block(
+            Row(["Title", "Dept", "Name"], node_id="h"),
+            Row([Types.STR, Types.STR, Types.STR], repeat="+", node_id="d"),
+            block_id="large",
+        )
+
+    def _small_block(self):
+        return Block(
+            Row(["Dept"], node_id="h2"),
+            Row([Types.STR], repeat="+", node_id="d2"),
+            block_id="small",
+        )
+
+    def test_without_consumption_mask_small_matches(self):
+        opts = MatchOptions(return_mode="ALL", consume_matched_regions=False)
+        matcher = TemplateMatcher(self.grid, "Sheet1", opts)
+        output = matcher.scan_for_blocks([self._large_block(), self._small_block()])
+        block_ids = [r.block_id for r in output.results]
+        self.assertIn("large", block_ids)
+        self.assertIn("small", block_ids)
+
+    def test_with_consumption_mask_small_excluded(self):
+        opts = MatchOptions(return_mode="ALL", consume_matched_regions=True)
+        matcher = TemplateMatcher(self.grid, "Sheet1", opts)
+        output = matcher.scan_for_blocks([self._large_block(), self._small_block()])
+        block_ids = [r.block_id for r in output.results]
+        self.assertIn("large", block_ids)
+        large_result = next(r for r in output.results if r.block_id == "large")
+        r1, c1, r2, c2 = large_result.bounding_box
+        for small_r in output.results:
+            if small_r.block_id == "small":
+                sr, sc = small_r.anchor
+                self.assertFalse(
+                    r1 <= sr <= r2 and c1 <= sc <= c2,
+                    f"Small block at {small_r.anchor} overlaps large block {(r1,c1,r2,c2)}"
+                )
+
+
+# ---------------------------------------------------------------------------
+# 15. is_row_all_empty with empty strings
+# ---------------------------------------------------------------------------
+
+class TestIsRowAllEmpty(unittest.TestCase):
+
+    def test_none_cells_are_empty(self):
+        grid = make_grid([[None, None, None]])
+        self.assertTrue(grid.is_row_all_empty(0, 0, 3))
+
+    def test_empty_string_cells_are_empty(self):
+        grid = make_grid([["", "", ""]])
+        self.assertTrue(grid.is_row_all_empty(0, 0, 3))
+
+    def test_nonempty_cell_is_not_empty(self):
+        grid = make_grid([["", "x", ""]])
+        self.assertFalse(grid.is_row_all_empty(0, 0, 3))
+
+    def test_mixed_none_and_empty_string(self):
+        grid = make_grid([[None, "", None]])
+        self.assertTrue(grid.is_row_all_empty(0, 0, 3))
+
+
+# ---------------------------------------------------------------------------
+# 16. to_dataframe with header_node
+# ---------------------------------------------------------------------------
+
+class TestToDataframeWithHeader(unittest.TestCase):
+
+    def setUp(self):
+        try:
+            import pandas
+            self._pandas_available = True
+        except ImportError:
+            self._pandas_available = False
+
+    def _make_result(self):
+        grid = make_grid([
+            ["部門", "姓名", "月薪"],
+            ["IT",   "Alice", 1000],
+            ["HR",   "Bob",   2000],
+        ])
+        block = Block(
+            Row(["部門", "姓名", "月薪"], node_id="header"),
+            Row([Types.STR, Types.STR, Types.INT], repeat="+", node_id="data"),
+        )
+        return make_matcher(grid)._try_match_block_vertical(0, 0, block)
+
+    def test_to_dataframe_with_header_node(self):
+        if not self._pandas_available:
+            self.skipTest("pandas not installed")
+        result = self._make_result()
+        df = result.to_dataframe(header_node="header")
+        self.assertEqual(list(df.columns), ["部門", "姓名", "月薪"])
+        self.assertEqual(len(df), 2)   # 2 data rows (header excluded)
+
+    def test_to_dataframe_default_no_column_names(self):
+        if not self._pandas_available:
+            self.skipTest("pandas not installed")
+        result = self._make_result()
+        df = result.to_dataframe()
+        # Default: integer column indices
+        self.assertEqual(list(df.columns), [0, 1, 2])
+        self.assertEqual(len(df), 3)   # header + 2 data rows
+
+
+# ---------------------------------------------------------------------------
+# 17. excel_range helper
+# ---------------------------------------------------------------------------
+
+class TestExcelRange(unittest.TestCase):
+
+    def test_a1_d20(self):
+        self.assertEqual(excel_range("A1:D20"), (0, 0, 19, 3))
+
+    def test_b3_f10(self):
+        self.assertEqual(excel_range("B3:F10"), (2, 1, 9, 5))
+
+    def test_single_row(self):
+        self.assertEqual(excel_range("A5:C5"), (4, 0, 4, 2))
+
+    def test_case_insensitive(self):
+        self.assertEqual(excel_range("a1:d20"), excel_range("A1:D20"))
+
+    def test_invalid_format_raises(self):
+        with self.assertRaises(ValueError):
+            excel_range("A1D20")
+        with self.assertRaises(ValueError):
+            excel_range("123:456")
+
+    def test_double_letter_column(self):
+        # AA = 26, so AA1:AB2 → col 26 to 27
+        r1, c1, r2, c2 = excel_range("AA1:AB2")
+        self.assertEqual(c1, 26)
+        self.assertEqual(c2, 27)
+        self.assertEqual(r1, 0)
+        self.assertEqual(r2, 1)
 
 
 if __name__ == "__main__":

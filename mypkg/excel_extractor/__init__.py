@@ -5,10 +5,11 @@ from mypkg.excel_extractor.template import Row, Col, EmptyRow, EmptyCol, Group, 
 from mypkg.excel_extractor.result import (
     NodeResult, MatchResult, NearMissHint, MatchOutput, MatchOptions,
 )
-from mypkg.excel_extractor.matcher import match_template
+from mypkg.excel_extractor.matcher import match_template, excel_range
 
 __all__ = [
     "match_template",
+    "excel_range",
     "Block", "Row", "Col", "EmptyRow", "EmptyCol", "Group",
     "Types", "CellCondition",
     "MatchOptions", "MatchOutput", "MatchResult", "NearMissHint", "NodeResult",

@@ -15,6 +15,7 @@ python -m venv venv
 # Windows: venv\Scripts\activate | Mac/Linux: source venv/bin/activate
 pip install -e .          # Core features only
 pip install -e .[math]    # Full features (NumBV & NumBVArray)
+pip install -e .[excel]   # Excel Extractor (adds openpyxl)
 pytest -q                 # Run tests
 ```
 
@@ -92,6 +93,35 @@ with tracker.stage("Process"): # Context Mode (Auto resource management)
     tracker.error("Missing input file")    # Accumulates error without crashing
 
 tracker.summary()                    # Auto-prints failure report
+```
+
+---
+
+## Excel Automation
+
+### [Excel Extractor](docs/excel_extractor/excel_extractor.md) — Template-Based Data Extraction
+
+Describe the *shape* of your data; the engine finds it wherever it lives on the sheet. Supports merged cells, repeating rows, multi-template composition, and near-miss debugging.
+
+```python
+from mypkg.excel_extractor import match_template, Block, Row, Types
+
+template = Block(
+    Row(["部門", "姓名", "月薪"]),
+    Row([Types.STR, Types.STR, Types.INT], repeat="+", node_id="data"),
+    block_id="salary_table",
+)
+
+output = match_template("report.xlsx", template)
+result = output.results[0]
+
+# Exact sheet coordinates for every matched row
+for node in result.data_nodes():
+    print(node.grid_row, node.cells)  # → absolute row + [dept, name, salary]
+
+# Find a specific row by id and write back later
+third = result.find_node("data", repeat_index=2)
+print(third.grid_row, third.grid_col)  # → exact (row, col) in the sheet
 ```
 
 ---
