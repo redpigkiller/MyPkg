@@ -41,6 +41,11 @@ class Scheduler:
         log_dir:    Directory for auto-captured stdout/stderr logs.
                     ``None`` = no log files.
         poll_interval: Seconds between scheduler loop ticks (default 0.5).
+        fail_fast:  If ``True``, the first job failure immediately cancels
+                    all remaining pending jobs and stops dispatching new work.
+                    Currently running jobs are allowed to finish naturally.
+                    Useful for CI pipelines where any failure should abort
+                    the entire run.  Default ``False``.
     """
 
     def __init__(
@@ -48,6 +53,7 @@ class Scheduler:
         resources: Optional[Dict[str, int]] = None,
         log_dir: Optional[Union[str, Path]] = None,
         poll_interval: float = 0.5,
+        fail_fast: bool = False,
     ) -> None:
         cpu = os.cpu_count() or 1
         self._capacity: Dict[str, int] = dict(resources) if resources else {"local": cpu}
@@ -63,6 +69,7 @@ class Scheduler:
 
         self._log_dir: Optional[Path] = Path(log_dir) if log_dir else None
         self._poll_interval = poll_interval
+        self._fail_fast = fail_fast
 
         self._jobs: List[Job] = []
         self._lock = threading.Lock()  # protects _jobs status + _used
@@ -138,6 +145,10 @@ class Scheduler:
         """All jobs with status ``"cancelled"``."""
         return [j for j in self._jobs if j.status == CANCELLED]
 
+    def jobs_by_tag(self, tag: str) -> List[Job]:
+        """Return all jobs that have *tag* in their ``tags`` list."""
+        return [j for j in self._jobs if tag in j.tags]
+
     # ----- public: execution -----
 
     def run(self) -> None:
@@ -182,6 +193,33 @@ class Scheduler:
         with self._lock:
             return self._paused
 
+    @property
+    def is_complete(self) -> bool:
+        """Return True if all submitted jobs have reached a terminal state.
+
+        Returns False if no jobs have been submitted yet.
+        Useful for driving interactive loops::
+
+            sched.start()
+            while not sched.is_complete:
+                cmd = input("command = ")
+                if cmd == "status":
+                    print(sched.status())
+        """
+        with self._lock:
+            if not self._jobs:
+                return False
+            return all(j.is_finished for j in self._jobs)
+
+    @property
+    def is_running(self) -> bool:
+        """Return True if the background scheduler thread is currently active.
+
+        Becomes True after ``start()`` is called and False once all jobs
+        are complete or ``stop()`` is called.
+        """
+        return self._bg_thread is not None and self._bg_thread.is_alive()
+
     # ----- public: interactive control -----
 
     def cancel(self, name: str) -> None:
@@ -207,14 +245,17 @@ class Scheduler:
         job = self.get(name)
         job.send_input(text)
 
-    def kill(self, name: str, force: bool = False) -> None:
-        """Kill a running job.
+    def kill(self, name: str) -> None:
+        """Forcefully terminate a running job.
 
-        Delegates to ``job.kill(force)`` which subclasses can override.
+        Always kills the process immediately (SIGKILL / taskkill /F).
+        For a graceful stop, use ``interrupt(name)`` (SIGINT) or
+        ``send_input(name, "exit\\n")`` if the job reads from stdin.
+
         Raises ``RuntimeError`` if the job is not running.
         """
         job = self.get(name)
-        job.kill(force=force)  # job.kill() checks status internally
+        job.kill()
 
     def set_priority(self, name: str, priority: int) -> None:
         """Change the priority of a pending job.
@@ -243,12 +284,8 @@ class Scheduler:
         for line in job.tail(n):
             print(f"[{name}] {line}")
 
-        with self._lock:
-            is_finished = job.is_finished
-            status = job.status
-
-        if is_finished:
-            print(f"--- {name} finished (status={status}) ---")
+        if job.is_finished:
+            print(f"--- {name} finished (status={job.status}) ---")
             return
 
         # Stream new output via hook
@@ -257,10 +294,7 @@ class Scheduler:
 
         job.add_hook("on_output", _printer)
         try:
-            while True:
-                with self._lock:
-                    if job.is_finished:
-                        break
+            while not job.is_finished:
                 time.sleep(0.2)
         except KeyboardInterrupt:
             pass
@@ -296,16 +330,17 @@ class Scheduler:
     def status(self) -> str:
         """Return a compact status table.
 
-        Lighter than ``summary()`` — shows type, name, status, priority.
+        Lighter than ``summary()`` — shows type, name, status, priority, progress.
         """
         lines = []
         state_str = " (PAUSED)" if self.is_paused else ""
-        hdr = f"{'Name':<20} {'Type':<10} {'Status':<12} {'Pri':<5}{state_str}"
+        hdr = f"{'Name':<20} {'Type':<10} {'Status':<12} {'Pri':<5} {'Progress':<10}{state_str}"
         lines.append(hdr)
         lines.append("─" * len(hdr))
         for j in self._jobs:
+            prog = f"{j.progress:.0f}%" if j.progress is not None else "-"
             lines.append(
-                f"{j.name:<20} {j.job_type:<10} {j.status:<12} {j.priority:<5}"
+                f"{j.name:<20} {j.job_type:<10} {j.status:<12} {j.priority:<5} {prog:<10}"
             )
         return "\n".join(lines)
 
@@ -313,14 +348,20 @@ class Scheduler:
         """Return a formatted table of all job statuses."""
         lines = []
         state_str = " (PAUSED)" if self.is_paused else ""
-        hdr = f"{'Name':<20} {'Type':<10} {'Status':<10} {'Exit':<6} {'Duration':<12}{state_str}"
+        hdr = (
+            f"{'Name':<20} {'Type':<10} {'Status':<10} {'Exit':<6}"
+            f" {'Duration':<12} {'Retries':<8} {'Progress':<10}{state_str}"
+        )
         lines.append(hdr)
         lines.append("-" * len(hdr))
         for j in self._jobs:
             dur = f"{j.duration:.1f}s" if j.duration is not None else "-"
             ec = str(j.exit_code) if j.exit_code is not None else "-"
+            prog = f"{j.progress:.0f}%" if j.progress is not None else "-"
+            retries = str(j.retry_count) if j.retry_count > 0 else "-"
             lines.append(
-                f"{j.name:<20} {j.job_type:<10} {j.status:<10} {ec:<6} {dur:<12}"
+                f"{j.name:<20} {j.job_type:<10} {j.status:<10} {ec:<6}"
+                f" {dur:<12} {retries:<8} {prog:<10}"
             )
         return "\n".join(lines)
 
@@ -335,13 +376,29 @@ class Scheduler:
                     break
 
                 with self._lock:
-                    self._fail_blocked_jobs()
+                    blocked_jobs = self._fail_blocked_jobs()
+
+                    # fail_fast: check for any failure BEFORE dispatching new jobs.
+                    # This ensures that once a job fails, no new pending jobs are
+                    # dispatched during this tick (or any subsequent tick).
+                    if self._fail_fast and any(j.status == FAILED for j in self._jobs):
+                        for j in self._jobs:
+                            if j.status == PENDING:
+                                j.status = CANCELLED
+                        self._stop_event.set()
+
                     ready = self._get_ready_jobs()
                     for job in ready:
                         if self._can_acquire(job):
                             self._acquire_resources(job)
                             job.status = RUNNING
+                            job._start_time = time.monotonic()  # set before worker starts
                             pool.submit(self._run_job, job)
+
+                # Fire on_fail hooks *outside* the lock to avoid deadlocks
+                # if a user hook calls sched.status() / sched.get() / etc.
+                for job in blocked_jobs:
+                    job._trigger_hook("on_fail")
 
                 # Check if all done
                 with self._lock:
@@ -353,33 +410,34 @@ class Scheduler:
 
                 time.sleep(self._poll_interval)
 
-    def _fail_blocked_jobs(self) -> None:
-        """Mark jobs as FAILED if any of their dependencies have failed or cancelled."""
+    def _fail_blocked_jobs(self) -> List[Job]:
+        """Mark jobs FAILED if a dependency failed/cancelled; return affected jobs.
+
+        Callers must invoke ``job._trigger_hook('on_fail')`` on the returned
+        list *outside* the scheduler lock to prevent deadlocks.
+        """
+        to_fail = []
         for job in self._jobs:
             if job.status == PENDING:
                 if any(dep.status in (FAILED, CANCELLED) for dep in job.depends_on):
                     job.status = FAILED
                     job.exit_code = -1
-                    job._trigger_hook("on_fail")
+                    to_fail.append(job)
+        return to_fail
 
     def _get_ready_jobs(self) -> List[Job]:
-        """Return pending jobs whose dependencies are met and resources
-        are available, sorted by priority (descending)."""
-        if self._paused:
-            return []
+        """Return pending jobs whose dependencies are all DONE, sorted by priority.
 
-        ready = []
-        for job in self._jobs:
-            if job.status != PENDING:
-                continue
-            # Check dependencies
-            if not all(dep.status == DONE for dep in job.depends_on):
-                continue
-            # Check resources
-            if not self._can_acquire(job):
-                continue
-            ready.append(job)
-        # Higher priority first
+        Resource availability is checked by the caller (``_execute_loop``) so
+        that ``_used`` is updated atomically between dispatches.
+        """
+        if self._paused or self._stop_event.is_set():
+            return []
+        ready = [
+            job for job in self._jobs
+            if job.status == PENDING
+            and all(dep.status == DONE for dep in job.depends_on)
+        ]
         ready.sort(key=lambda j: j.priority, reverse=True)
         return ready
 
@@ -403,58 +461,88 @@ class Scheduler:
     # ----- internal: job execution (runs in worker thread) -----
 
     def _run_job(self, job: Job) -> None:
-        """Execute a single job in a worker thread.
+        """Execute a single job in a worker thread, with retry support.
 
         Delegates actual execution to ``job._execute(log_file)``.
-        This wrapper handles timing, log files, timeout, resource release,
-        and error handling uniformly for all Job types.
+        This wrapper handles timing, log files, timeout, error handling,
+        retry loops, and resource release uniformly for all Job types.
         """
-        start_time = time.monotonic()
+        import time as _time
+
+        # _start_time is already set by _execute_loop just before pool.submit
+        # so job.duration is always valid when status==RUNNING.
+        # Overwrite here only if not already set (edge case: subclass calls _run_job directly).
+        if job._start_time is None:
+            job._start_time = _time.monotonic()
 
         log_file = None
         timer = None
 
+        attempt = 0
+        while True:   # retry loop
+            try:
+                # Set up log file (open once; retries append to same file)
+                if self._log_dir and log_file is None:
+                    self._log_dir.mkdir(parents=True, exist_ok=True)
+                    job.log_path = self._log_dir / f"{job.name}.log"
+                    log_file = open(job.log_path, "w", encoding="utf-8")
+
+                # Timeout watchdog
+                if job.timeout is not None and job.timeout > 0:
+                    def _timeout_handler():
+                        if job.status == RUNNING:
+                            job._emit_line(
+                                f"[scheduler] timeout ({job.timeout}s) — killing job"
+                            )
+                            try:
+                                job.kill()  # always forceful
+                            except Exception:
+                                pass
+                    timer = threading.Timer(job.timeout, _timeout_handler)
+                    timer.daemon = True
+                    timer.start()
+
+                if attempt == 0:
+                    job._trigger_hook("on_start")
+                    job._pre_execute()
+                else:
+                    job._emit_line(f"[scheduler] retry {attempt}/{job.max_retries}")
+
+                job._execute(log_file)
+
+            except Exception as exc:
+                logger.error("Job %r crashed: %s", job.name, exc)
+                with self._lock:
+                    job.status = FAILED
+                    job.exit_code = -1
+                job._emit_line(f"[scheduler] internal error: {exc}")
+
+            finally:
+                if timer is not None:
+                    timer.cancel()
+                    timer = None
+
+            # --- retry decision ---
+            should_retry = (
+                job.status == FAILED
+                and attempt < job.max_retries
+                and (job.retry_if is None or job.retry_if(job))
+            )
+            if not should_retry:
+                break
+
+            attempt += 1
+            job.retry_count = attempt
+            job._reset_for_retry()
+            _time.sleep(0.1)  # brief pause between retries
+
+        # --- finalize ---
         try:
-            # Set up log file
-            if self._log_dir:
-                self._log_dir.mkdir(parents=True, exist_ok=True)
-                job.log_path = self._log_dir / f"{job.name}.log"
-                log_file = open(job.log_path, "w", encoding="utf-8")
-
-            # Timeout watchdog
-            if job.timeout is not None and job.timeout > 0:
-                def _timeout_handler():
-                    with self._lock:
-                        status = job.status
-                    if status == RUNNING:
-                        job._emit_line(
-                            f"[scheduler] timeout ({job.timeout}s) — killing job"
-                        )
-                        try:
-                            job.kill()
-                        except Exception:
-                            pass
-                timer = threading.Timer(job.timeout, _timeout_handler)
-                timer.daemon = True
-                timer.start()
-
-            job._trigger_hook("on_start")
-            job._pre_execute()
-            job._execute(log_file)
-
-        except Exception as exc:
-            logger.error("Job %r crashed: %s", job.name, exc)
-            with self._lock:
-                job.status = FAILED
-                job.exit_code = -1
-            job._emit_line(f"[scheduler] internal error: {exc}")
-
-        finally:
-            job._post_execute()
-            if timer is not None:
-                timer.cancel()
-            with self._lock:
-                job.duration = time.monotonic() - start_time
+            # Freeze duration; _post_execute fires on_done/on_fail so hooks
+            # can read job.duration and get a valid non-None value.
+            job._end_time = _time.monotonic()
             if log_file:
                 log_file.close()
+            job._post_execute()
+        finally:
             self._release_resources(job)

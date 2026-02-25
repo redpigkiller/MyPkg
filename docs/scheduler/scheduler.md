@@ -67,7 +67,7 @@ sim_job = CmdJob(
 sched.submit(compile_job, sim_job)
 sched.run()          # This command blocks, waiting until ALL tasks are finished
 
-sched.summary()      # After it finishes, print a beautifully formatted summary report!
+print(sched.summary())  # After it finishes, print a beautifully formatted summary report!
 ```
 
 ---
@@ -86,6 +86,8 @@ Here is how you can operate the `Scheduler` object. Every command gives you full
 * `pause()`: Pause the scheduler. **Currently running Jobs will finish**, but no new tasks will be dispatched.
 * `resume()`: Resume the scheduler. Tasks queued during the pause will start being dispatched again.
 * `stop()`: Tells the Scheduler: "Stop dispatching new tasks!". However, it is very polite and will wait for any **currently running** Jobs to finish properly before it actually shuts down.
+* `is_complete() -> bool`: Returns `True` when every submitted job has reached a terminal state (done/failed/cancelled). Returns `False` if no jobs were submitted. Ideal for driving interactive loops.
+* `is_running -> bool` (property): Returns `True` if the background scheduler thread is currently active (i.e., after `start()` is called and before it finishes).
 
 ### 🕹️ Single Job Interaction
 When you want to do something to a specific task (`"job_name"`) in the queue:
@@ -99,8 +101,8 @@ When you want to do something to a specific task (`"job_name"`) in the queue:
 
 ### 📊 Status and Filtering
 Want to know where everyone is at right now?
-* `status()`: Prints a concise current status table in the terminal (who is waiting, who is running).
-* `summary()`: Prints the final billing summary! (Includes execution time and success/failure status for all tasks).
+* `status() -> str`: **Returns** a concise status table string. Use `print(sched.status())` to display it.
+* `summary() -> str`: **Returns** a detailed summary table string with execution times. Use `print(sched.summary())` to display it.
 * You can also directly inspect the rosters (returns a list of Jobs):
   * `sched.pending`: The list of jobs still waiting in line.
   * `sched.running`: The list of jobs currently executing.
@@ -161,8 +163,13 @@ job.remove_hook("on_output", my_callback)
 **Reading Output History**
 ```python
 job.tail(20)          # Grab the last 20 lines of output
-job.output_lines      # Get the full output history (list[str])
+job.output_lines      # Get the full output history snapshot (list[str])
 ```
+
+> [!NOTE]
+> `on_output` hooks fire **in real-time** as each line is produced by the process.
+> `output_lines` and `tail()` are **snapshot reads** — they return whatever has been
+> captured so far and are safe to call from any thread.
 
 ### Matchers — Smart Log Analysis
 
@@ -271,3 +278,73 @@ sched.action("math_task", "say_hi")
 ```
 
 Congratulations! You now fully understand all the secrets of the Scheduler, from its lowest-level concepts to advanced extensions!
+
+---
+
+## Integration Patterns: CLI / TUI / GUI
+
+### Pattern A — Short-lived jobs (blocking)
+
+The simplest pattern: submit everything, call `run()`, and inspect results afterwards.
+
+```python
+from mypkg import Scheduler, CmdJob
+
+sched = Scheduler(resources={"local": 4})
+sched.submit(CmdJob("build", cmd="make -j4"))
+sched.submit(CmdJob("test",  cmd="pytest", depends_on=[sched.get("build")]))
+
+sched.run()               # blocks until all jobs finish
+print(sched.summary())    # summary() returns a str — print it yourself
+```
+
+### Pattern B — Long-running monitoring loop (CLI / TUI)
+
+Use `start()` + `is_complete()` to drive an interactive command loop.
+
+```python
+from mypkg import Scheduler, CmdJob
+
+sched = Scheduler(resources={"local": 4})
+sched.submit(CmdJob("sim", cmd="python run_sim.py", timeout=3600))
+sched.start()                          # non-blocking: returns immediately
+
+while not sched.is_complete():
+    cmd = input("command> ").strip()
+    if cmd == "status":
+        print(sched.status())          # status() returns a str
+    elif cmd == "summary":
+        print(sched.summary())         # summary() returns a str
+    elif cmd == "pause":
+        sched.pause()
+    elif cmd == "resume":
+        sched.resume()
+    elif cmd.startswith("kill "):
+        sched.kill(cmd.split()[1])
+    elif cmd.startswith("follow "):
+        sched.follow(cmd.split()[1])   # streams output until job finishes
+    elif cmd.startswith("cancel "):
+        sched.cancel(cmd.split()[1])
+
+sched.wait()                          # ensure background thread exits cleanly
+print(sched.summary())
+```
+
+### Pattern C — GUI / async callback-driven
+
+For GUI frameworks that run their own event loop, use hooks instead of polling.
+
+```python
+from mypkg import Scheduler, CmdJob
+
+sched = Scheduler(resources={"local": 4})
+job = CmdJob("long_task", cmd="python heavy.py")
+
+# GUI callback: update a progress widget on every output line
+job.add_hook("on_output", lambda line, j: gui.append_log(line))
+job.add_hook("on_done",   lambda j: gui.show_success(j.name))
+job.add_hook("on_fail",   lambda j: gui.show_error(j.name, j.exit_code))
+
+sched.submit(job)
+sched.start()   # scheduler runs in background; GUI event loop continues
+```

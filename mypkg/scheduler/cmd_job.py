@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 from typing import Callable, Dict, Tuple, Union
 
-from mypkg.scheduler.job import Job, DONE, FAILED
+from mypkg.scheduler.job import Job, RUNNING, DONE, FAILED
 
 
 def _open_file_cross_platform(path: Union[str, Path]) -> None:
@@ -59,7 +59,7 @@ class CmdJob(Job):
         # Stream stdout line-by-line
         assert proc.stdout is not None
         for raw_line in proc.stdout:
-            line = raw_line.rstrip("\n").rstrip("\r")
+            line = raw_line.rstrip()  # strip \r, \n, and trailing spaces (e.g. Windows echo padding)
             self._emit_line(line)
             if log_file:
                 log_file.write(raw_line)
@@ -67,7 +67,10 @@ class CmdJob(Job):
 
         proc.wait()
         self.exit_code = proc.returncode
-        self.status = DONE if proc.returncode == 0 else FAILED
+        # Only set status from exit code if a matcher (fail_if/done_if) hasn't
+        # already overridden it during output streaming.
+        if self.status == RUNNING:
+            self.status = DONE if proc.returncode == 0 else FAILED
 
     def actions(self) -> Dict[str, Tuple[str, Callable]]:
         acts = super().actions()

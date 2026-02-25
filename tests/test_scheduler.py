@@ -87,13 +87,27 @@ class TestJobBasics:
         j = Job("j", cmd="echo x", resources={"grid": 2, "license": 1})
         assert j.resources == {"grid": 2, "license": 1}
 
-    def test_empty_name_raises(self):
-        with pytest.raises(ValueError):
-            Job("", cmd="echo x")
+    def test_auto_name_when_omitted(self):
+        """Omitting name should auto-generate a unique string identifier."""
+        j = Job(cmd="echo x")
+        assert j.name  # non-empty
+        assert j.name.startswith("Job_")
 
-    def test_empty_cmd_raises(self):
-        with pytest.raises(ValueError):
-            Job("j", cmd="")
+    def test_auto_name_unique(self):
+        """Two auto-named jobs must not share the same name."""
+        j1 = Job(cmd="echo x")
+        j2 = Job(cmd="echo y")
+        assert j1.name != j2.name
+
+    def test_auto_name_uses_class_name(self):
+        """Auto-name prefix matches the concrete class name."""
+        j = CmdJob(cmd="echo x")
+        assert j.name.startswith("CmdJob_")
+
+    def test_empty_cmd_auto_labels(self):
+        """cmd is now optional; omitting it auto-assigns a label."""
+        j = Job("j")
+        assert j.cmd == "<Job>"   # auto-label from class name
 
     def test_tail(self):
         j = Job("j", cmd="echo x")
@@ -885,3 +899,588 @@ class TestLifecycle:
         sched.submit(j)
         sched.run()
         assert "done" in log
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 27. is_complete / is_running
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestIsComplete:
+    def test_is_complete_false_before_run(self):
+        sched = Scheduler(resources={"local": 1})
+        j = CmdJob("j", cmd=_echo_cmd("hi"))
+        sched.submit(j)
+        assert sched.is_complete is False
+
+    def test_is_complete_no_jobs_returns_false(self):
+        sched = Scheduler(resources={"local": 1})
+        assert sched.is_complete is False
+
+    def test_is_complete_true_after_run(self):
+        sched = Scheduler(resources={"local": 1})
+        sched.submit(CmdJob("j", cmd=_echo_cmd("hi")))
+        sched.run()
+        assert sched.is_complete is True
+
+    def test_is_complete_true_with_failed_jobs(self):
+        """All-failed is also complete."""
+        sched = Scheduler(resources={"local": 1})
+        sched.submit(CmdJob("j", cmd=_fail_cmd()))
+        sched.run()
+        assert sched.is_complete is True
+
+    def test_is_complete_false_while_running(self):
+        """is_complete is False while jobs are still executing."""
+        sched = Scheduler(resources={"local": 1})
+        sched.submit(CmdJob("slow", cmd=_sleep_cmd(1.0)))
+        sched.start()
+        # Poll until running
+        for _ in range(40):
+            if sched.running:
+                break
+            time.sleep(0.05)
+        assert sched.is_complete is False
+        sched.wait()
+        assert sched.is_complete is True
+
+    def test_is_complete_interactive_loop(self):
+        """Verify while-not-is_complete control loop pattern works correctly."""
+        sched = Scheduler(resources={"local": 1})
+        sched.submit(CmdJob("j", cmd=_echo_cmd("hi")))
+        sched.start()
+        iterations = 0
+        while not sched.is_complete:
+            iterations += 1
+            time.sleep(0.05)
+            if iterations > 200:  # safety guard (~10s)
+                break
+        assert sched.is_complete is True
+
+
+class TestIsRunning:
+    def test_is_running_false_before_start(self):
+        sched = Scheduler(resources={"local": 1})
+        sched.submit(CmdJob("j", cmd=_echo_cmd("hi")))
+        assert sched.is_running is False
+
+    def test_is_running_true_after_start(self):
+        sched = Scheduler(resources={"local": 1})
+        sched.submit(CmdJob("j", cmd=_sleep_cmd(0.5)))
+        sched.start()
+        assert sched.is_running is True
+        sched.wait()
+        assert sched.is_running is False
+
+    def test_is_running_false_after_run(self):
+        """run() is blocking; is_running is False once it returns."""
+        sched = Scheduler(resources={"local": 1})
+        sched.submit(CmdJob("j", cmd=_echo_cmd("hi")))
+        sched.run()
+        assert sched.is_running is False
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 28. Output whitespace stripping
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestOutputStripping:
+    def test_no_trailing_whitespace(self):
+        """output_lines must never contain trailing whitespace (Windows echo pads)."""
+        sched = Scheduler(resources={"local": 1})
+        j = CmdJob("strip", cmd=_echo_cmd("hello"))
+        sched.submit(j)
+        sched.run()
+        for line in j.output_lines:
+            assert line == line.rstrip(), f"Trailing whitespace found: {line!r}"
+
+    def test_no_trailing_whitespace_multiline(self):
+        sched = Scheduler(resources={"local": 1})
+        j = CmdJob("mstrip", cmd=_multi_echo_cmd("alpha", "beta", "gamma"))
+        sched.submit(j)
+        sched.run()
+        for line in j.output_lines:
+            assert line == line.rstrip(), f"Trailing whitespace found: {line!r}"
+
+    def test_on_output_hook_no_trailing_whitespace(self):
+        """Lines delivered via on_output hook should also be clean."""
+        received = []
+        sched = Scheduler(resources={"local": 1})
+        j = CmdJob("hook_strip", cmd=_echo_cmd("stream"))
+        j.add_hook("on_output", lambda line, job: received.append(line))
+        sched.submit(j)
+        sched.run()
+        for line in received:
+            assert line == line.rstrip(), f"Trailing whitespace in hook: {line!r}"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 29. duration available in on_done / on_fail hooks
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestDurationInHooks:
+    def test_duration_set_in_on_done_hook(self):
+        """job.duration must not be None when on_done fires."""
+        durations = []
+        sched = Scheduler(resources={"local": 1})
+        j = CmdJob("dur", cmd=_echo_cmd("hi"))
+        j.add_hook("on_done", lambda job: durations.append(job.duration))
+        sched.submit(j)
+        sched.run()
+        assert len(durations) == 1
+        assert durations[0] is not None
+        assert durations[0] >= 0.0
+
+    def test_duration_set_in_on_fail_hook(self):
+        """job.duration must not be None when on_fail fires."""
+        durations = []
+        sched = Scheduler(resources={"local": 1})
+        j = CmdJob("fail_dur", cmd=_fail_cmd())
+        j.add_hook("on_fail", lambda job: durations.append(job.duration))
+        sched.submit(j)
+        sched.run()
+        assert len(durations) == 1
+        assert durations[0] is not None
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 30. add_matcher returns name
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestAddMatcherReturnsName:
+    def test_returns_custom_name(self):
+        j = Job("j", cmd="echo x")
+        name = j.add_matcher(lambda line: line, lambda v, j: None, name="my_m")
+        assert name == "my_m"
+
+    def test_returns_generated_name(self):
+        j = Job("j", cmd="echo x")
+        name = j.add_matcher(lambda line: line, lambda v, j: None)
+        assert isinstance(name, str) and len(name) > 0
+
+    def test_returned_name_can_remove(self):
+        results = []
+        j = Job("j", cmd="echo x")
+        name = j.add_matcher(
+            lambda line: line,
+            lambda val, job: results.append(val),
+            timing="realtime",
+        )
+        j._emit_line("before")
+        j.remove_matcher(name)
+        j._emit_line("after")
+        assert results == ["before"]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 31. Live duration
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestLiveDuration:
+    def test_duration_none_before_start(self):
+        j = CmdJob("j", cmd=_echo_cmd("hi"))
+        assert j.duration is None
+
+    def test_duration_positive_while_running(self):
+        sched = Scheduler(resources={"local": 1})
+        j = CmdJob("j", cmd=_sleep_cmd(1.0))
+        sched.submit(j)
+        sched.start()
+        # Wait until duration is live (set atomically when status→RUNNING)
+        for _ in range(40):
+            if j.duration is not None:
+                break
+            time.sleep(0.05)
+        assert j.duration is not None
+        assert j.duration > 0.0
+        sched.wait()
+
+    def test_duration_frozen_after_done(self):
+        sched = Scheduler(resources={"local": 1})
+        j = CmdJob("j", cmd=_echo_cmd("hi"))
+        sched.submit(j)
+        sched.run()
+        d1 = j.duration
+        time.sleep(0.1)
+        d2 = j.duration
+        assert d1 is not None
+        assert d1 == d2, "duration should be frozen after job finishes"
+
+    def test_duration_set_in_on_done_hook(self):
+        """Regression: duration must not be None when on_done fires."""
+        durations = []
+        sched = Scheduler(resources={"local": 1})
+        j = CmdJob("dur", cmd=_echo_cmd("hi"))
+        j.add_hook("on_done", lambda job: durations.append(job.duration))
+        sched.submit(j)
+        sched.run()
+        assert durations[0] is not None and durations[0] >= 0.0
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 32. Tags & jobs_by_tag
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestTags:
+    def test_tags_set_on_job(self):
+        j = CmdJob("j", cmd=_echo_cmd("hi"), tags=["wave1", "regression"])
+        assert "wave1" in j.tags
+        assert "regression" in j.tags
+
+    def test_jobs_by_tag(self):
+        sched = Scheduler(resources={"local": 2})
+        j1 = CmdJob("a", cmd=_echo_cmd("a"), tags=["wave1"])
+        j2 = CmdJob("b", cmd=_echo_cmd("b"), tags=["wave2"])
+        j3 = CmdJob("c", cmd=_echo_cmd("c"), tags=["wave1"])
+        sched.submit(j1, j2, j3)
+        sched.run()
+        wave1 = sched.jobs_by_tag("wave1")
+        assert set(j.name for j in wave1) == {"a", "c"}
+
+    def test_jobs_by_tag_empty(self):
+        sched = Scheduler(resources={"local": 1})
+        sched.submit(CmdJob("j", cmd=_echo_cmd("hi"), tags=["foo"]))
+        assert sched.jobs_by_tag("bar") == []
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 33. progress field
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestProgress:
+    def test_progress_default_none(self):
+        j = CmdJob("j", cmd=_echo_cmd("hi"))
+        assert j.progress is None
+
+    def test_progress_set_via_hook(self):
+        import re
+        sched = Scheduler(resources={"local": 1})
+        j = CmdJob("j", cmd=_echo_cmd("50"))
+        j.add_matcher(
+            lambda line: re.search(r"(\d+)", line),
+            lambda m, job: setattr(job, "progress", float(m.group(1))),
+        )
+        sched.submit(j)
+        sched.run()
+        assert j.progress == 50.0
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 34. max_retries & retry_if
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestRetry:
+    def test_no_retry_by_default(self):
+        sched = Scheduler(resources={"local": 1})
+        j = CmdJob("j", cmd=_fail_cmd())
+        sched.submit(j)
+        sched.run()
+        assert j.status == "failed"
+        assert j.retry_count == 0
+
+    def test_retries_n_times_then_fails(self):
+        sched = Scheduler(resources={"local": 1})
+        j = CmdJob("j", cmd=_fail_cmd(), max_retries=2)
+        sched.submit(j)
+        sched.run()
+        assert j.status == "failed"
+        assert j.retry_count == 2
+
+    def test_retry_succeeds_on_second_attempt(self):
+        """First attempt fails, second succeeds — job ends as DONE."""
+        attempt_file = None
+        import tempfile, os
+        attempt_file = tempfile.mktemp(suffix=".flag")
+
+        # Command: if flag file exists → succeed; else create it → fail
+        if _IS_WIN:
+            cmd = (
+                f'cmd /c "if exist {attempt_file} (exit 0) else ('
+                f'echo. > {attempt_file} & exit 1)"'
+            )
+        else:
+            cmd = (
+                f'sh -c "if [ -f {attempt_file} ]; then exit 0; '
+                f'else touch {attempt_file}; exit 1; fi"'
+            )
+        try:
+            sched = Scheduler(resources={"local": 1})
+            j = CmdJob("j", cmd=cmd, max_retries=2)
+            sched.submit(j)
+            sched.run()
+            assert j.status == "done"
+            assert j.retry_count == 1
+        finally:
+            if os.path.exists(attempt_file):
+                os.remove(attempt_file)
+
+    def test_retry_if_skips_retry_on_predicate_false(self):
+        """retry_if=lambda j: False → never retries, fails immediately."""
+        sched = Scheduler(resources={"local": 1})
+        j = CmdJob("j", cmd=_fail_cmd(), max_retries=3, retry_if=lambda j: False)
+        sched.submit(j)
+        sched.run()
+        assert j.status == "failed"
+        assert j.retry_count == 0
+
+    def test_retry_if_skips_on_specific_exit_code(self):
+        """Compile error (exit 2 → don't retry); other error (exit 1 → retry)."""
+        sched = Scheduler(resources={"local": 1})
+        j = CmdJob(
+            "j",
+            cmd=_fail_cmd(),   # exit 1 on windows/linux
+            max_retries=3,
+            retry_if=lambda job: job.exit_code != 1,  # exit 1 → don't retry
+        )
+        sched.submit(j)
+        sched.run()
+        assert j.status == "failed"
+        assert j.retry_count == 0  # exit_code==1 → retry_if returned False → no retry
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 35. fail_if / done_if helpers
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestFailIfDoneIf:
+    def test_fail_if_overrides_exit_0(self):
+        """Exit 0 but output contains 'FAILED' → job should be FAILED."""
+        sched = Scheduler(resources={"local": 1})
+        j = CmdJob("j", cmd=_echo_cmd("SIMULATION FAILED"))
+        j.fail_if(lambda line, job: "SIMULATION FAILED" in line)
+        sched.submit(j)
+        sched.run()
+        assert j.status == "failed"
+
+    def test_done_if_overrides_nonzero_exit(self):
+        """Non-zero exit but output says PASSED → job should be DONE."""
+        # Command that prints PASSED then exits non-zero
+        if _IS_WIN:
+            cmd = 'cmd /c "echo SIMULATION PASSED & exit 1"'
+        else:
+            cmd = 'sh -c "echo SIMULATION PASSED; exit 1"'
+        sched = Scheduler(resources={"local": 1})
+        j = CmdJob("j", cmd=cmd)
+        j.done_if(lambda line, job: "SIMULATION PASSED" in line)
+        sched.submit(j)
+        sched.run()
+        assert j.status == "done"
+
+    def test_fail_if_callback_not_triggered(self):
+        """No matching line → fail_if has no effect, job stays done."""
+        sched = Scheduler(resources={"local": 1})
+        j = CmdJob("j", cmd=_echo_cmd("everything is fine"))
+        j.fail_if(lambda line, job: "FAILED" in line)
+        sched.submit(j)
+        sched.run()
+        assert j.status == "done"
+
+    def test_fail_if_uses_full_callback(self):
+        """fail_if callback has access to the job object."""
+        seen_jobs = []
+        sched = Scheduler(resources={"local": 1})
+        j = CmdJob("j", cmd=_echo_cmd("ERROR"))
+        j.fail_if(lambda line, job: (seen_jobs.append(job) or True) if "ERROR" in line else False)
+        sched.submit(j)
+        sched.run()
+        assert len(seen_jobs) == 1
+        assert seen_jobs[0] is j
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 36. Dynamic submit while running (Case 7)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestDynamicSubmit:
+    def test_submit_while_running(self):
+        """Submit new jobs from an on_done hook while scheduler is running."""
+        sched = Scheduler(resources={"local": 2})
+        results = []
+
+        coord = CmdJob("coord", cmd=_echo_cmd("params"))
+
+        def on_coord_done(job):
+            # Dynamically inject two more jobs
+            j1 = CmdJob("dyn_a", cmd=_echo_cmd("a"))
+            j2 = CmdJob("dyn_b", cmd=_echo_cmd("b"))
+            j1.add_hook("on_done", lambda j: results.append(j.name))
+            j2.add_hook("on_done", lambda j: results.append(j.name))
+            sched.submit(j1, j2)
+
+        coord.add_hook("on_done", on_coord_done)
+        sched.submit(coord)
+        sched.start()
+
+        # Drive with is_complete — waits for dynamically submitted jobs
+        for _ in range(100):
+            if sched.is_complete:
+                break
+            time.sleep(0.1)
+
+        assert sched.is_complete
+        assert set(results) == {"dyn_a", "dyn_b"}
+
+    def test_is_complete_waits_for_dynamic_jobs(self):
+        """is_complete should be False until dynamic jobs also finish."""
+        sched = Scheduler(resources={"local": 1})
+        coord = CmdJob("coord", cmd=_echo_cmd("go"))
+
+        def on_done(job):
+            sched.submit(CmdJob("dyn", cmd=_sleep_cmd(0.3)))
+
+        coord.add_hook("on_done", on_done)
+        sched.submit(coord)
+        sched.start()
+
+        # Wait for coord to finish, then immediately check
+        for _ in range(40):
+            if sched.get("coord").is_finished:
+                break
+            time.sleep(0.05)
+
+        # At this point dyn may not be done yet — is_complete should reflect that
+        # (Give the hook a brief moment to fire and submit)
+        time.sleep(0.1)
+        # Now poll until truly complete
+        for _ in range(60):
+            if sched.is_complete:
+                break
+            time.sleep(0.1)
+
+        assert sched.is_complete
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 37. Auto-naming — parameter sweep workflow
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestAutoNameWorkflow:
+    def test_parameter_sweep_no_name_conflict(self):
+        """Multiple anonymous jobs can be submitted without naming collisions."""
+        sched = Scheduler(resources={"local": 4})
+        for i in range(5):
+            sched.submit(CmdJob(cmd=_echo_cmd(f"run_{i}"), tags=["sweep"]))
+        sched.run()
+        sweep_jobs = sched.jobs_by_tag("sweep")
+        assert len(sweep_jobs) == 5
+        assert all(j.status == "done" for j in sweep_jobs)
+
+    def test_unnamed_and_named_can_coexist(self):
+        """Explicitly named and auto-named jobs can coexist in the same scheduler."""
+        sched = Scheduler(resources={"local": 2})
+        sched.submit(CmdJob(name="explicit", cmd=_echo_cmd("named")))
+        sched.submit(CmdJob(cmd=_echo_cmd("anon"), tags=["anon"]))
+        sched.run()
+        assert sched.get("explicit").status == "done"
+        assert len(sched.jobs_by_tag("anon")) == 1
+        assert sched.jobs_by_tag("anon")[0].status == "done"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 38. fail_fast — abort on first failure
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestFailFast:
+    def test_fail_fast_cancels_pending_on_failure(self):
+        """With fail_fast=True, a job failure should cancel remaining pending jobs."""
+        sched = Scheduler(resources={"local": 1}, fail_fast=True)
+        # local=1 → sequential; bad runs first → good never dispatched
+        bad = CmdJob(name="bad", cmd=_fail_cmd(), priority=10)
+        good = CmdJob(name="good", cmd=_echo_cmd("ok"), priority=1)
+        sched.submit(bad, good)
+        sched.run()
+        assert bad.status == "failed"
+        assert good.status == "cancelled"
+
+    def test_fail_fast_false_does_not_cancel_peers(self):
+        """With fail_fast=False (default), peer jobs are NOT cancelled on failure."""
+        sched = Scheduler(resources={"local": 1}, fail_fast=False)
+        bad = CmdJob(name="bad", cmd=_fail_cmd(), priority=10)
+        good = CmdJob(name="good", cmd=_echo_cmd("ok"), priority=1)
+        sched.submit(bad, good)
+        sched.run()
+        assert bad.status == "failed"
+        assert good.status == "done"  # still ran normally
+
+    def test_fail_fast_completes_already_running_jobs(self):
+        """fail_fast cancels pending jobs, but jobs already running should finish."""
+        sched = Scheduler(resources={"local": 2}, fail_fast=True)
+        # Both run concurrently: bad fails quickly, slow is already running
+        bad = CmdJob(name="bad", cmd=_fail_cmd())
+        slow = CmdJob(name="slow", cmd=_sleep_cmd(0.5))
+        pending = CmdJob(name="pending", cmd=_echo_cmd("never"))
+        sched.submit(bad, slow, pending)
+        sched.run()
+        assert bad.status == "failed"
+        # slow was already dispatched before fail_fast triggered
+        assert slow.status == "done"
+        assert pending.status == "cancelled"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 39. job.wait() — single job blocking
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestJobWait:
+    def test_wait_returns_true_when_done(self):
+        """job.wait() should return True after the job completes."""
+        sched = Scheduler(resources={"local": 1})
+        j = CmdJob("j", cmd=_echo_cmd("hi"))
+        sched.submit(j)
+        sched.start()
+        result = j.wait(timeout=10.0)
+        sched.wait()
+        assert result is True
+        assert j.status == "done"
+
+    def test_wait_returns_false_on_timeout(self):
+        """job.wait(timeout=...) should return False if job hasn't finished yet."""
+        sched = Scheduler(resources={"local": 1})
+        j = CmdJob("j", cmd=_sleep_cmd(5.0))
+        sched.submit(j)
+        sched.start()
+        # Wait for the job to start, then check wait() with tiny timeout
+        for _ in range(40):
+            if j.status == "running":
+                break
+            time.sleep(0.05)
+        result = j.wait(timeout=0.1)
+        assert result is False
+        sched.kill("j")
+        sched.wait()
+
+    def test_wait_for_specific_job_among_many(self):
+        """wait() allows blocking on one critical job while others proceed."""
+        sched = Scheduler(resources={"local": 4})
+        critical = CmdJob("critical", cmd=_echo_cmd("ready"))
+        others = [CmdJob(cmd=_sleep_cmd(0.5), tags=["bg"]) for _ in range(3)]
+        sched.submit(critical, *others)
+        sched.start()
+        finished = critical.wait(timeout=10.0)
+        assert finished is True
+        assert critical.status == "done"
+        # Scheduler itself may still be running for the bg jobs — that's the point
+        sched.wait()
+        assert all(j.status == "done" for j in sched.jobs_by_tag("bg"))
+
+    def test_wait_already_finished(self):
+        """wait() on an already-finished job should return immediately (True)."""
+        sched = Scheduler(resources={"local": 1})
+        j = CmdJob("j", cmd=_echo_cmd("hi"))
+        sched.submit(j)
+        sched.run()
+        assert j.is_finished
+        result = j.wait(timeout=0.0)  # should not block at all
+        assert result is True

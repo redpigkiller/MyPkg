@@ -13,6 +13,8 @@ import signal
 import subprocess
 import sys
 import threading
+import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Optional, Tuple, Union
@@ -56,18 +58,26 @@ class Job:
     """A schedulable unit of work.
 
     Attributes:
-        name:        Unique identifier for this job.
-        cmd:         Shell command string to execute.
-        cwd:         Working directory (None = inherit from Scheduler).
-        env:         Extra environment variables merged with ``os.environ``.
-        priority:    Higher value = run first.  Default ``0``.
-        depends_on:  Jobs that must finish before this one starts.
-        resources:   Resource requirements, e.g. ``{"local": 1}``.
-        timeout:     Max wall-clock seconds. ``None`` = no limit.
-        status:      Current state: pending / running / done / failed / cancelled.
-        exit_code:   Process return code (``None`` until finished).
-        duration:    Wall-clock seconds (``None`` until finished).
-        log_path:    Auto-assigned log file path (``None`` if no log_dir).
+        name:         Unique identifier for this job.
+        cmd:          Shell command string to execute (or label for custom jobs).
+        cwd:          Working directory (None = inherit from Scheduler).
+        env:          Extra environment variables merged with ``os.environ``.
+        priority:     Higher value = run first.  Default ``0``.
+        depends_on:   Jobs that must finish before this one starts.
+        resources:    Resource requirements, e.g. ``{"local": 1}``.
+        timeout:      Max wall-clock seconds. ``None`` = no limit.
+        tags:         Free-form labels for grouping/filtering, e.g. ``["wave1", "regression"]``.
+        max_retries:  Number of times to retry after failure (default 0 = no retry).
+        retry_if:     Callable ``(job) -> bool`` — if provided, only retry when it
+                      returns True.  ``None`` means always retry.
+        status:       Current state: pending / running / done / failed / cancelled.
+        exit_code:    Process return code (``None`` until finished).
+        duration:     Elapsed wall-clock seconds.  Updated in real-time while
+                      running; frozen at the finish time once the job completes.
+        progress:     Optional 0–100 float for progress tracking. Set by the user
+                      via matchers or hooks; displayed in ``status()``/``summary()``.
+        log_path:     Auto-assigned log file path (``None`` if no log_dir).
+        retry_count:  How many retries have been executed so far (0-based).
     """
 
     # Subclasses can override to declare default resource requirements.
@@ -75,8 +85,8 @@ class Job:
 
     def __init__(
         self,
-        name: str,
-        cmd: str,
+        name: Optional[str] = None,
+        cmd: str = "",
         *,
         cwd: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
@@ -84,11 +94,16 @@ class Job:
         depends_on: Optional[List["Job"]] = None,
         resources: Optional[Dict[str, int]] = None,
         timeout: Optional[float] = None,
+        tags: Optional[List[str]] = None,
+        max_retries: int = 0,
+        retry_if: Optional[Callable[["Job"], bool]] = None,
     ) -> None:
+        # Auto-generate a unique name if not provided.
         if not name:
-            raise ValueError("Job name must not be empty.")
+            name = f"{type(self).__name__}_{uuid.uuid4().hex[:8]}"
+        # cmd is optional for custom subclasses; auto-label if omitted
         if not cmd:
-            raise ValueError("Job cmd must not be empty.")
+            cmd = f"<{type(self).__name__}>"
 
         self.name = name
         self.cmd = cmd
@@ -100,12 +115,23 @@ class Job:
             dict(resources) if resources is not None else dict(self.default_resources)
         )
         self.timeout = timeout
+        self.tags: List[str] = list(tags) if tags else []
+        self.max_retries = max_retries
+        self.retry_if = retry_if
 
         # --- runtime state (managed by Scheduler) ---
         self.status: JobStatus = PENDING
         self.exit_code: Optional[int] = None
-        self.duration: Optional[float] = None
+        self.progress: Optional[float] = None
         self.log_path: Optional[Path] = None
+        self.retry_count: int = 0
+
+        # --- timing ---
+        self._start_time: Optional[float] = None   # set by Scheduler on first dispatch
+        self._end_time: Optional[float] = None     # set by Scheduler on finish
+
+        # --- completion event (set by _post_execute; cleared on retry) ---
+        self._finished_event = threading.Event()
 
         # --- process handle (set during _execute) ---
         self._proc: Optional[subprocess.Popen] = None
@@ -179,14 +205,47 @@ class Job:
         elif self.status == FAILED:
             self._trigger_hook("on_fail")
 
+        # Unblock anyone waiting on job.wait()
+        self._finished_event.set()
+
+    def _reset_for_retry(self) -> None:
+        """Reset runtime state so the job can be re-executed.  Called by Scheduler."""
+        self._proc_ready.clear()
+        self._finished_event.clear()
+        self._proc = None
+        self._output_buffer.clear()
+        self.exit_code = None
+        self.progress = None
+        self._end_time = None
+        self.status = RUNNING  # stays RUNNING across retries
+
+    # ----- timing -----
+
+    @property
+    def duration(self) -> Optional[float]:
+        """Elapsed wall-clock seconds.
+
+        - ``None`` if the job has not started yet.
+        - Live running total while the job is executing.
+        - Frozen at the finish time once the job completes.
+        """
+        if self._start_time is None:
+            return None
+        end = self._end_time
+        if end is not None:
+            return end - self._start_time
+        return time.monotonic() - self._start_time
+
     # ----- output streaming API -----
 
     def _emit_line(self, line: str) -> None:
         """Internal: buffer a line and notify all hooks / matchers."""
         with self._lock:
             self._output_buffer.append(line)
-            # snapshot matchers under lock
+            # Snapshot both matchers and hooks under lock to prevent
+            # RuntimeError if add_hook/add_matcher is called concurrently.
             matchers = [m for m in self._matchers if m.timing == "realtime"]
+            output_hooks = list(self._hooks["on_output"])
 
         to_remove = []
         for m in matchers:
@@ -203,7 +262,7 @@ class Job:
         for m_name in to_remove:
             self.remove_matcher(m_name)
 
-        for hook_cb in self._hooks["on_output"]:
+        for hook_cb in output_hooks:
             try:
                 hook_cb(line, self)
             except Exception as exc:
@@ -219,6 +278,74 @@ class Job:
         """Full output history (snapshot copy)."""
         with self._lock:
             return list(self._output_buffer)
+
+    # ----- status helpers -----
+
+    def fail_if(
+        self,
+        callback: Callable[[str, "Job"], bool],
+        *,
+        timing: MatchTiming = "realtime",
+    ) -> str:
+        """Mark the job FAILED when *callback(line, job)* returns True.
+
+        Adds a matcher that sets ``self.status = FAILED`` and
+        ``self.exit_code = 1`` on the first matching line.  Subsequent
+        output continues streaming (you can still read it), but the
+        final status will be FAILED regardless of the process exit code.
+
+        Returns the matcher name so you can remove it with
+        ``remove_matcher(name)`` if needed.
+
+        Example::
+
+            # Fail even if the process exits with code 0
+            job.fail_if(lambda line, j: "SIMULATION FAILED" in line)
+        """
+        def _match(line: str) -> bool:
+            try:
+                return bool(callback(line, self))
+            except Exception:
+                return False
+
+        def _apply(result: bool, job: "Job") -> None:
+            job.status = FAILED
+            if job.exit_code is None:
+                job.exit_code = 1
+
+        return self.add_matcher(_match, _apply, once=True, timing=timing)
+
+    def done_if(
+        self,
+        callback: Callable[[str, "Job"], bool],
+        *,
+        timing: MatchTiming = "realtime",
+    ) -> str:
+        """Mark the job DONE when *callback(line, job)* returns True.
+
+        Useful when a tool prints a "PASSED" / "COMPLETE" line before
+        exiting, and you want to trust the output rather than the
+        exit code.
+
+        Returns the matcher name so you can remove it with
+        ``remove_matcher(name)`` if needed.
+
+        Example::
+
+            job.done_if(lambda line, j: "Simulation PASSED" in line)
+        """
+        def _match(line: str) -> bool:
+            try:
+                return bool(callback(line, self))
+            except Exception:
+                return False
+
+        def _apply(result: bool, job: "Job") -> None:
+            job.status = DONE
+            if job.exit_code is None:
+                job.exit_code = 0
+
+        return self.add_matcher(_match, _apply, once=True, timing=timing)
 
     # ----- interactive control -----
 
@@ -249,17 +376,17 @@ class Job:
         else:
             self._proc.send_signal(signal.SIGINT)
 
-    def kill(self, force: bool = False) -> None:
-        """Terminate the running process.
+    def kill(self) -> None:
+        """Forcefully terminate the running process.
 
-        If force=False, calls interrupt() instead of forceful kill.
-        Subclasses can override for custom kill behaviour.
-        Raises ``RuntimeError`` if job is not running.
+        On Windows: uses ``taskkill /F /T`` to kill the entire process tree.
+        On POSIX:   sends SIGTERM, escalates to SIGKILL after 5 s.
+
+        For a graceful stop, use ``interrupt()`` (SIGINT) or
+        ``send_input("exit\\n")`` if the process reads from stdin.
+
+        Raises ``RuntimeError`` if the job is not running.
         """
-        if not force:
-            self.interrupt()
-            return
-
         if self.status != RUNNING:
             raise RuntimeError(f"Job {self.name!r} is not running (status={self.status}).")
         # Wait for process handle (status may change to RUNNING before Popen).
@@ -303,12 +430,16 @@ class Job:
         name: Optional[str] = None,
         once: bool = False,
         timing: MatchTiming = "realtime"
-    ) -> None:
-        """Add an OutputMatcher for log analysis."""
+    ) -> str:
+        """Add an OutputMatcher for log analysis.
+
+        Returns the matcher *name* so it can be passed to ``remove_matcher()``.
+        """
         if name is None:
             name = f"matcher_{len(self._matchers)}_{id(match_fn)}"
         with self._lock:
             self._matchers.append(OutputMatcher(name, match_fn, callback, once, timing))
+        return name
 
     def remove_matcher(self, name: str) -> None:
         """Remove an OutputMatcher by name."""
@@ -355,6 +486,26 @@ class Job:
 
     # ----- helpers -----
 
+    def wait(self, timeout: Optional[float] = None) -> bool:
+        """Block until the job reaches a terminal state (done/failed/cancelled).
+
+        Uses a ``threading.Event`` internally — no busy-polling, no CPU waste.
+
+        Args:
+            timeout: Maximum seconds to wait.  ``None`` = wait forever.
+
+        Returns:
+            ``True`` if the job finished within the timeout, ``False`` if the
+            timeout expired before the job completed.
+
+        Example::
+
+            sched.start()
+            if not setup_job.wait(timeout=30):
+                print("Setup timed out!")
+        """
+        return self._finished_event.wait(timeout)
+
     @property
     def is_finished(self) -> bool:
         return self.status in (DONE, FAILED, CANCELLED)
@@ -365,7 +516,11 @@ class Job:
         return type(self).__name__
 
     def __repr__(self) -> str:
+        dur = f", duration={self.duration:.1f}s" if self.duration is not None else ""
+        prog = f", progress={self.progress:.0f}%" if self.progress is not None else ""
+        tags = f", tags={self.tags}" if self.tags else ""
         return (
             f"{self.job_type}({self.name!r}, status={self.status!r}, "
-            f"exit_code={self.exit_code}, priority={self.priority})"
+            f"exit_code={self.exit_code}, priority={self.priority}"
+            f"{dur}{prog}{tags})"
         )

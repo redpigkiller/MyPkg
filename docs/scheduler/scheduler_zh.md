@@ -67,7 +67,7 @@ sim_job = CmdJob(
 sched.submit(compile_job, sim_job)
 sched.run()          # 這個指令會卡住 (Blocking)，直到所有任務都跑完為止
 
-sched.summary()      # 跑完後，印出漂亮的總結報表！
+print(sched.summary())  # 跑完後，印出漂亮的總結報表！(summary() 回傳 str)
 ```
 
 ---
@@ -86,6 +86,8 @@ sched.summary()      # 跑完後，印出漂亮的總結報表！
 * `pause()`：暫停排程器。**正在執行中的 Job 會繼續跑完**，但不會再派發新的任務。
 * `resume()`：恢復排程器。暫停期間排隊的任務會重新開始被派發。
 * `stop()`：告訴 Scheduler：「別再派發新的任務了！」。但它非常有禮貌，會等**正在執行中**的 Job 乖乖跑完才真正結束。
+* `is_complete() -> bool`：如果所有已提交的 Job 都已到達終態（done/failed/cancelled）則回傳 `True`，尚未提交任何 Job 時回傳 `False`。適合驅動互動迴圈。
+* `is_running` (property → bool)：排程器的背景執行緒是否仍在運行（`start()` 後為 `True`，結束後為 `False`）。
 
 ### 🕹️ 單一任務互動
 你想針對排隊中的特定一個任務 (`"任務名稱"`) 做事時：
@@ -99,8 +101,8 @@ sched.summary()      # 跑完後，印出漂亮的總結報表！
 
 ### 📊 狀態與篩選
 想知道大家現在都跑到哪裡了嗎？
-* `status()`：在終端機印出簡潔的目前狀況表 (誰在排隊、誰在跑)。
-* `summary()`：在最後印出總結帳單！(包含所有任務的花費時間、成功或失敗)。
+* `status() -> str`：**回傳**簡潔的目前狀況表（誰在排隊、誰在跑），用 `print(sched.status())` 來顯示。
+* `summary() -> str`：**回傳**詳細的總結帳單（包含所有任務的花費時間、成功或失敗），用 `print(sched.summary())` 來顯示。
 * 你還可以直接調閱名單 (會回傳 Job 的清單)：
   * `sched.pending`：還在排隊的名單
   * `sched.running`：正在執行的名單
@@ -161,8 +163,12 @@ job.remove_hook("on_output", my_callback)
 **讀取歷史輸出**
 ```python
 job.tail(20)          # 直接拿最後 20 行產出
-job.output_lines      # 取得完整 output 紀錄 (list[str])
+job.output_lines      # 取得完整 output 紀錄快照 (list[str])
 ```
+
+> [!NOTE]
+> `on_output` hook 是**即時觸發**的，每當 process 產出一行就立刻呼叫。
+> `output_lines` 和 `tail()` 是**快照讀取** — 回傳當下已捕捉到的內容，可從任何 thread 安全呼叫。
 
 ### Matchers — 智慧型 Log 分析
 
@@ -270,3 +276,73 @@ sched.action("math_task", "say_hi")
 ```
 
 恭喜你！現在你完全了解 Scheduler 從底層概念到進階擴充的所有秘密了！
+
+---
+
+## 整合模式：CLI / TUI / GUI
+
+### 模式 A — 短時工作（Blocking）
+
+最簡單的用法：提交所有任務，呼叫 `run()`，結束後查看結果。
+
+```python
+from mypkg import Scheduler, CmdJob
+
+sched = Scheduler(resources={"local": 4})
+sched.submit(CmdJob("build", cmd="make -j4"))
+sched.submit(CmdJob("test",  cmd="pytest", depends_on=[sched.get("build")]))
+
+sched.run()                    # 阻塞直到所有 job 完成
+print(sched.summary())         # summary() 回傳 str，用 print() 顯示
+```
+
+### 模式 B — 長時監控迴圈（CLI / TUI）
+
+用 `start()` + `is_complete()` 驅動互動式命令迴圈。
+
+```python
+from mypkg import Scheduler, CmdJob
+
+sched = Scheduler(resources={"local": 4})
+sched.submit(CmdJob("sim", cmd="python run_sim.py", timeout=3600))
+sched.start()                          # 非阻塞，立刻返回
+
+while not sched.is_complete():
+    cmd = input("command> ").strip()
+    if cmd == "status":
+        print(sched.status())          # 回傳 str
+    elif cmd == "summary":
+        print(sched.summary())         # 回傳 str
+    elif cmd == "pause":
+        sched.pause()
+    elif cmd == "resume":
+        sched.resume()
+    elif cmd.startswith("kill "):
+        sched.kill(cmd.split()[1])
+    elif cmd.startswith("follow "):
+        sched.follow(cmd.split()[1])   # 即時串流輸出直到 job 結束
+    elif cmd.startswith("cancel "):
+        sched.cancel(cmd.split()[1])
+
+sched.wait()                          # 確保背景執行緒乾淨退出
+print(sched.summary())
+```
+
+### 模式 C — GUI / 事件驅動（callback 模式）
+
+GUI 框架有自己的事件迴圈，改用 hook 取代輪詢。
+
+```python
+from mypkg import Scheduler, CmdJob
+
+sched = Scheduler(resources={"local": 4})
+job = CmdJob("long_task", cmd="python heavy.py")
+
+# GUI callback：每行輸出時更新進度 widget
+job.add_hook("on_output", lambda line, j: gui.append_log(line))
+job.add_hook("on_done",   lambda j: gui.show_success(j.name))
+job.add_hook("on_fail",   lambda j: gui.show_error(j.name, j.exit_code))
+
+sched.submit(job)
+sched.start()   # scheduler 在背景跑，GUI event loop 繼續
+```
