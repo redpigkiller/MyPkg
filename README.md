@@ -108,7 +108,7 @@ Describe the *shape* of your data; the engine finds it wherever it lives on the 
 from mypkg.excel_extractor import match_template, Block, Row, Types
 
 template = Block(
-    Row(["部門", "姓名", "月薪"]),
+    Row(["部門", "姓名", "月薪"], normalize=True, fuzzy=0.9),
     Row([Types.STR, Types.STR, Types.INT], repeat="+", node_id="data"),
     block_id="salary_table",
 )
@@ -125,29 +125,6 @@ third = result.find_node("data", repeat_index=2)
 print(third.grid_row, third.grid_col)  # → exact (row, col) in the sheet
 ```
 
-### Dynamic Column Extraction (`RecordBlock`)
-
-For sparse matching of many columns (e.g. searching headers by name in any order):
-
-```python
-from pydantic import BaseModel
-from mypkg.excel_extractor import match_template, RecordBlock, Field, Types
-
-class Employee(BaseModel):
-    name: str
-    salary: int
-
-template = RecordBlock(
-    Field(header="姓名", pattern=Types.STR, name="name"),
-    Field(header="月薪", pattern=Types.INT, name="salary"),
-)
-
-output = match_template("report.xls", template)
-employees = output.results[0].to_models(Employee)
-print(employees[0].name, employees[0].salary)
-```
-
----
 
 ## Scheduler
 

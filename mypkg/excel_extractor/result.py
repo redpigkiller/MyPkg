@@ -170,8 +170,8 @@ class MatchResult:
     def to_models(self, model_cls: type) -> list[Any]:
         """Convert matched data rows into Pydantic models.
         
-        Requires that the matched block had a header row (e.g., from a RecordBlock
-        or explicitly specifying header_node if from a generic Block). 
+        Requires that the matched block had a header row (e.g., explicitly
+        specifying header_node if from a generic Block). 
         The first row must contain the field names matching the model's fields.
         
         Parameters
@@ -285,3 +285,4 @@ class MatchOptions:
     near_miss_threshold:     float | None = None
     search_range:            tuple[int, int, int, int] | None = None
     consume_matched_regions: bool = False
+    warn_fuzzy:              bool = True

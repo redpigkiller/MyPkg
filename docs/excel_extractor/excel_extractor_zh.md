@@ -64,6 +64,7 @@ for result in output.results:
 | `Types.TIME` | 時間字串 `HH:MM` |
 | `Types.MERGED` | 從合併儲存格擴展的格子 |
 | `Types.ANY` | 任何非空值（萬用字元） |
+| `Types.ANY(n)` | 連續 `n` 個 `Types.ANY`（例如 `Types.ANY(3)`） |
 | `Types.EMPTY` | 真正空白的格子（`None`） |
 | `Types.SPACE` | 空字串或純空白字元 |
 | `Types.BLANK` | **`EMPTY` 或 `SPACE`**（任何「看起來空白」的格子） |
@@ -95,9 +96,12 @@ Block(*children, block_id="my_block", orientation="vertical")
 ### `Row` / `Col` — 樣式節點
 
 ```python
-Row(pattern, repeat=1, node_id=None)
-Col(pattern, repeat=1, node_id=None)
+Row(pattern, repeat=1, node_id=None, normalize=True, fuzzy=None)
+Col(pattern, repeat=1, node_id=None, normalize=True, fuzzy=None)
 ```
+
+- `normalize=True` — 比對前會將字串去頭尾空白並轉為小寫。
+- `fuzzy=0.8`（需要安裝 `rapidfuzz` 擴展 `[excel]`）— 允許相似度大於等於 0.8 的字串字面量比對通過。
 
 `pattern` 是一個列表，每個元素可以是：
 - **純字串** → 精確比對（例如 `"部門"`）

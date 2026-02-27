@@ -60,8 +60,18 @@ def _normalise_pattern(pattern: list[Any]) -> list[CellCondition]:
             result.append(item)
         elif isinstance(item, str):
             result.append(_literal(item))
+        elif isinstance(item, list):
+            # This allows syntax like `Row(["Name", Types.ANY(3), "Salary"])`
+            # since `Types.ANY(3)` returns a list of 3 `Types.ANY` conditions.
+            for sub_item in item:
+                if isinstance(sub_item, CellCondition):
+                    result.append(sub_item)
+                elif isinstance(sub_item, str):
+                    result.append(_literal(sub_item))
+                else:
+                    raise TypeError(f"Nested pattern elements must be str or CellCondition, got {type(sub_item)}")
         else:
-            raise TypeError(f"Pattern elements must be str or CellCondition, got {type(item)}")
+            raise TypeError(f"Pattern elements must be str, CellCondition, or a list, got {type(item)}")
     return result
 
 
@@ -82,6 +92,8 @@ class Row(TemplateNode):
     pattern: list[CellCondition] = field(default_factory=list)
     repeat: RepeatSpec = 1
     node_id: str | None = None
+    normalize: bool = True
+    fuzzy: float | None = None
 
     def __post_init__(self):
         self.pattern = _normalise_pattern(self.pattern)
@@ -109,6 +121,8 @@ class Col(TemplateNode):
     pattern: list[CellCondition] = field(default_factory=list)
     repeat: RepeatSpec = 1
     node_id: str | None = None
+    normalize: bool = True
+    fuzzy: float | None = None
 
     def __post_init__(self):
         self.pattern = _normalise_pattern(self.pattern)
@@ -248,63 +262,5 @@ class Block(TemplateNode):
         id_part = f"{self.block_id!r}, " if self.block_id else ""
         return f"Block({id_part}{self.orientation}, {len(self.children)} children)"
 
-
-@dataclass
-class Field:
-    """A field to extract from a record table.
-    
-    Parameters
-    ----------
-    header  : The string name or CellCondition to find in the Excel header row
-    pattern : The CellCondition for the data cells in this column
-    name    : Optional string label for the output. If None, derived from header if string.
-    """
-    header: CellCondition
-    pattern: CellCondition
-    name: str
-
-    def __init__(self, header: str | CellCondition, pattern: CellCondition, name: str | None = None):
-        self.header = _literal(header) if isinstance(header, str) else header
-        self.pattern = pattern
-        if name is not None:
-            self.name = name
-        elif isinstance(header, str):
-            self.name = header
-        else:
-            self.name = "Unknown"
-
-
-@dataclass
-class RecordBlock(TemplateNode):
-    """Matches a header row and extracts subsequent data rows into dictionary records.
-    
-    It scans the anchor row for all specified headers. If found, it extracts
-    data from exactly those columns for all consecutive rows that match the patterns.
-    Columns not specified in fields are ignored.
-    """
-    fields: list[Field] = field(default_factory=list)
-    repeat: RepeatSpec = "+"
-    block_id: str | None = None
-    orientation: Literal["vertical"] = "vertical"
-
-    def __init__(self, *fields: Field, repeat: RepeatSpec = "+", block_id: str | None = None):
-        if not fields:
-            raise ValueError("RecordBlock requires at least one Field")
-        self.fields = list(fields)
-        self.repeat = repeat
-        self._repeat_range = _parse_repeat(repeat)
-        self.block_id = block_id
-        
-    @property
-    def repeat_min(self) -> int:
-        return self._repeat_range[0]
-
-    @property
-    def repeat_max(self) -> int | None:
-        return self._repeat_range[1]
-
-    def __repr__(self) -> str:
-        id_part = f"{self.block_id!r}, " if self.block_id else ""
-        return f"RecordBlock({id_part}{len(self.fields)} fields)"
 
 

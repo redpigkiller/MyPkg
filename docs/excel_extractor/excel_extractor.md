@@ -64,6 +64,7 @@ for result in output.results:
 | `Types.TIME` | Time string `HH:MM` |
 | `Types.MERGED` | A cell expanded from a merge region |
 | `Types.ANY` | Any non-empty value (wildcard) |
+| `Types.ANY(n)` | `n` consecutive `Types.ANY` (e.g., `Types.ANY(3)`) |
 | `Types.EMPTY` | Truly empty cell (`None`) |
 | `Types.SPACE` | Empty string or whitespace-only |
 | `Types.BLANK` | **`EMPTY` or `SPACE`** — any "visually blank" cell |
@@ -96,9 +97,12 @@ Block(*children, block_id="my_block", orientation="vertical")
 ### `Row` / `Col` — Pattern nodes
 
 ```python
-Row(pattern, repeat=1, node_id=None)
-Col(pattern, repeat=1, node_id=None)
+Row(pattern, repeat=1, node_id=None, normalize=True, fuzzy=None)
+Col(pattern, repeat=1, node_id=None, normalize=True, fuzzy=None)
 ```
+
+- `normalize=True` — strips and lowercases string cells before matching.
+- `fuzzy=0.8` (requires `rapidfuzz` installed extra `[excel]`) — matches literal string patterns with a similarity ratio >= 0.8.
 
 `pattern` is a list where each element is:
 - A **plain string** → matched literally (e.g. `"Dept"`)

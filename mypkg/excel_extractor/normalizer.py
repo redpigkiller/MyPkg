@@ -165,23 +165,21 @@ def load_and_normalize_excel(
     """
     path_str = str(file_path)
     if path_str.lower().endswith(".xls"):
-        return _load_xls(file_path, sheet)
-    return _load_xlsx(file_path, sheet)
+        import xlrd
+        wb = xlrd.open_workbook(path_str, formatting_info=True)
+        return _load_xls_from_wb(wb, sheet)
+    
+    import openpyxl
+    wb = openpyxl.load_workbook(path_str, data_only=True)
+    res = _load_xlsx_from_wb(wb, sheet)
+    wb.close()
+    return res
 
-def _load_xlsx(
-    file_path: str | Path,
+def _load_xlsx_from_wb(
+    wb: Any,
     sheet: str | int = 0,
 ) -> tuple[InternalGrid, str]:
-    try:
-        import openpyxl
-        from openpyxl.cell.cell import MergedCell
-    except ImportError:
-        raise ImportError(
-            "excel_extractor requires openpyxl. "
-            "Install with: pip install openpyxl  or  pip install mypkg[excel]"
-        )
-
-    wb = openpyxl.load_workbook(str(file_path), data_only=True)
+    from openpyxl.cell.cell import MergedCell
 
     # Resolve sheet
     if isinstance(sheet, int):
@@ -231,19 +229,11 @@ def _load_xlsx(
 
     return InternalGrid(grid_cells), sheet_name
 
-def _load_xls(
-    file_path: str | Path,
+def _load_xls_from_wb(
+    wb: Any,
     sheet: str | int = 0,
 ) -> tuple[InternalGrid, str]:
-    try:
-        import xlrd
-    except ImportError:
-        raise ImportError(
-            "excel_extractor requires xlrd for .xls files. "
-            "Install with: pip install xlrd  or  pip install mypkg[excel]"
-        )
-
-    wb = xlrd.open_workbook(str(file_path), formatting_info=True)
+    import xlrd
 
     if isinstance(sheet, int):
         sh = wb.sheet_by_index(sheet)

@@ -132,32 +132,6 @@ third = result.find_node("data", repeat_index=2)
 print(third.grid_row, third.grid_col)  # → sheet 中的確切 (row, col) 座標
 ```
 
-### 動態欄位擷取 (`RecordBlock`)
-
-當你需要處理包含大量欄位的表格，但只關心特定幾個欄位，且欄位順序可能變更時使用：
-
-```python
-from pydantic import BaseModel
-from mypkg.excel_extractor import match_template, RecordBlock, Field, Types
-
-class Employee(BaseModel):
-    name: str
-    salary: int
-
-# 只要表頭符合設定的名稱，就能自動找出對應的欄位索引並擷取
-template = RecordBlock(
-    Field(header="姓名", pattern=Types.STR, name="name"),
-    Field(header="月薪", pattern=Types.INT, name="salary"),
-)
-
-output = match_template("report.xls", template)
-
-# 利用 to_models 直接轉換為 Pydantic Model
-employees = output.results[0].to_models(Employee)
-print(employees[0].name, employees[0].salary)
-```
-
----
 
 ## 任務排程器
 

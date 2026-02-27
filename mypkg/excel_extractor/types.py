@@ -25,6 +25,7 @@ class CellCondition:
     is_merged: bool = False
     any_val: bool = False
     matches_none: bool = False
+    original_str: str | None = None
 
     def matches(self, value: str | None, is_merged: bool) -> bool:
         """Return True if a normalised InternalCell satisfies this condition."""
@@ -55,12 +56,28 @@ class CellCondition:
             pattern=combined,
             is_merged=self.is_merged or other.is_merged,
             matches_none=self.matches_none or other.matches_none,
+            # we lose original_str when ORing
         )
+
+    def __call__(self, n: int) -> list["CellCondition"]:
+        """Syntactic sugar for repeating a condition n times in a row pattern.
+        
+        Example
+        -------
+        ::
+        
+            Row(["ID", Types.ANY(3), "Status"])
+            # Equivalent to:
+            # Row(["ID", Types.ANY, Types.ANY, Types.ANY, "Status"])
+        """
+        if not isinstance(n, int) or n < 0:
+            raise ValueError(f"Repeat count must be a non-negative integer, got {n!r}")
+        return [self] * n
 
 
 def _literal(s: str) -> CellCondition:
     """Turn a plain Python string into a literal-match CellCondition."""
-    return CellCondition(pattern=re.escape(s))
+    return CellCondition(pattern=re.escape(s), original_str=s)
 
 
 class Types:

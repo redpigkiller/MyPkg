@@ -40,7 +40,7 @@ from typing import Any
 
 from mypkg.excel_extractor.types import CellCondition, Types
 from mypkg.excel_extractor.template import (
-    Block, Col, EmptyCol, EmptyRow, Group, Row, TemplateNode, RecordBlock,
+    Block, Col, EmptyCol, EmptyRow, Group, Row, TemplateNode,
 )
 from mypkg.excel_extractor.result import (
     MatchOptions, MatchOutput, MatchResult, NearMissHint, NodeResult,
@@ -94,8 +94,58 @@ def excel_range(ref: str) -> tuple[int, int, int, int]:
 # Cell-level matching
 # ---------------------------------------------------------------------------
 
-def _cell_matches(cell: InternalCell, condition: CellCondition) -> bool:
-    return condition.matches(cell.value, cell.is_merged)
+def _cell_matches(
+    cell: InternalCell,
+    condition: CellCondition,
+    normalize: bool = False,
+    fuzzy: float | None = None,
+    warn_fuzzy: bool = False,
+) -> bool:
+    val = cell.value
+    if val is not None and isinstance(val, str) and normalize:
+        val = val.strip().lower()
+
+    # If it's not a fuzzy match, just use the built-in matcher
+    if not fuzzy or not condition.pattern or condition.any_val or condition.matches_none or condition.is_merged:
+        if normalize and val is not None and condition.pattern:
+            # For normalized matching of strings, we also need to normalize the pattern if it's literal-like
+            # Since CellCondition pattern is a regex, lowercasing it might be tricky, but we can try ignoring case using (?i)
+            # A simpler way is to let the Condition handle it, but for our simple literals, we can just lowercase the pattern if no regex special chars.
+            # However, for robustness, we use rapidfuzz if available or just let CellCondition.matches handle it.
+            # If normalize is true, we should pass (?i) to regex?
+            # Actually, types.py doesn't have an easy way. Let's just pass the normalized value.
+            pass
+            
+        return condition.matches(val, cell.is_merged)
+    
+    # Fuzzy matching requires rapidfuzz
+    try:
+        from rapidfuzz import fuzz
+    except ImportError:
+        import warnings
+        warnings.warn("rapidfuzz is required for fuzzy matching. Falling back to exact match.")
+        return condition.matches(val, cell.is_merged)
+        
+    if val is None:
+        return condition.matches_none
+        
+    # We only apply fuzzy logic if it's a literal string match that has original_str
+    if condition.original_str is None:
+        return False
+        
+    pattern_str = condition.original_str
+    if normalize:
+        pattern_str = pattern_str.strip().lower()
+        
+    ratio = fuzz.ratio(pattern_str, val) / 100.0
+    
+    if ratio >= fuzzy:
+        if warn_fuzzy and ratio < 1.0:
+            import warnings
+            warnings.warn(f"Fuzzy matched '{pattern_str}' with '{val}' (ratio: {ratio:.2f})")
+        return True
+        
+    return False
 
 
 def _condition_desc(cond: CellCondition) -> str:
@@ -115,14 +165,12 @@ def _condition_desc(cond: CellCondition) -> str:
 # Area estimator for consumption-mask sort
 # ---------------------------------------------------------------------------
 
-def _estimate_area(block: Block | RecordBlock) -> int:
+def _estimate_area(block: Block) -> int:
     """Return a rough area estimate (rows × cols) for sort-ordering purposes.
 
     Counts only the minimum required repetitions so that optional nodes
     do not artificially inflate the estimate.
     """
-    if isinstance(block, RecordBlock):
-        return (1 + block.repeat_min) * len(block.fields)
     if block.orientation == "vertical":
         rows = sum(
             c.repeat_min if hasattr(c, "repeat_min") else 1
@@ -187,7 +235,13 @@ class TemplateMatcher:
             return None
         extracted = []
         for cell, cond in zip(cells, pat):
-            if not _cell_matches(cell, cond):
+            if not _cell_matches(
+                cell,
+                cond,
+                normalize=row_node.normalize,
+                fuzzy=row_node.fuzzy,
+                warn_fuzzy=self.options.warn_fuzzy,
+            ):
                 return None
             extracted.append(cell.original_value)
         return extracted
@@ -227,7 +281,7 @@ class TemplateMatcher:
             return None
         extracted = []
         for cell, cond in zip(cells, pat):
-            if not _cell_matches(cell, cond):
+            if not _cell_matches(cell, cond, normalize=col_node.normalize, fuzzy=col_node.fuzzy, warn_fuzzy=self.options.warn_fuzzy):
                 return None
             extracted.append(cell.original_value)
         return extracted
@@ -576,119 +630,13 @@ class TemplateMatcher:
             current += 1
         return None, None
 
-    # ------------------------------------------------------------------ #
-    # Block matching (RecordBlock)                                        #
-    # ------------------------------------------------------------------ #
 
-    def _try_match_record_block(
-        self,
-        start_row: int,
-        start_col: int,
-        block: RecordBlock,
-    ) -> MatchResult | None:
-        cells = self.grid.get_row_slice(start_row, start_col, self.grid.num_cols - start_col)
-        
-        col_mapping: dict[int, int] = {}
-        used_cols = set()
-        
-        for i, f in enumerate(block.fields):
-            found_col = -1
-            for c_offset, cell in enumerate(cells):
-                if c_offset in used_cols:
-                    continue
-                if _cell_matches(cell, f.header):
-                    found_col = start_col + c_offset
-                    break
-            if found_col == -1:
-                return None
-            col_mapping[i] = found_col
-            used_cols.add(c_offset)
-
-        matched_nodes = []
-        matched_nodes.append(NodeResult(
-            "Row", "header", 0, [f.name for f in block.fields],
-            grid_row=start_row, grid_col=start_col
-        ))
-        
-        count = 0
-        cursor = start_row + 1
-        rep_min, rep_max = block.repeat_min, block.repeat_max
-        
-        while rep_max is None or count < rep_max:
-            if cursor >= self.grid.num_rows:
-                break
-                
-            extracted = []
-            row_matches = True
-            for i, f in enumerate(block.fields):
-                grid_col = col_mapping[i]
-                cell = self.grid.get_cell(cursor, grid_col)
-                if cell is None:
-                    cell = InternalCell(value=None, original_value=None, is_merged=False)
-                if not _cell_matches(cell, f.pattern):
-                    row_matches = False
-                    break
-                extracted.append(cell.original_value)
-                
-            if not row_matches:
-                break
-                
-            matched_nodes.append(NodeResult(
-                "Row", "data", count, extracted,
-                grid_row=cursor, grid_col=start_col
-            ))
-            count += 1
-            cursor += 1
-            
-        if count < rep_min:
-            return None
-            
-        return MatchResult(
-            block_id=block.block_id,
-            sheet=self.sheet_name,
-            anchor=(start_row, start_col),
-            orientation="vertical",
-            matched_nodes=matched_nodes,
-        )
-
-    def _partial_score_record_block(
-        self, start_row: int, start_col: int, block: RecordBlock
-    ) -> tuple[float, str, str | None, str | None]:
-        # Count matched headers vs total fields
-        cells = self.grid.get_row_slice(start_row, start_col, self.grid.num_cols - start_col)
-        used_cols = set()
-        matched_headers = 0
-        failed_header = None
-        
-        for i, f in enumerate(block.fields):
-            found_col = -1
-            for c_offset, cell in enumerate(cells):
-                if c_offset in used_cols:
-                    continue
-                if _cell_matches(cell, f.header):
-                    found_col = start_col + c_offset
-                    break
-            if found_col != -1:
-                matched_headers += 1
-                used_cols.add(c_offset)
-            elif failed_header is None:
-                failed_header = f
-
-        if matched_headers < len(block.fields):
-            return (
-                matched_headers / len(block.fields), 
-                f"Header '{failed_header.name}' not found",
-                _condition_desc(failed_header.header),
-                None
-            )
-
-        return 1.0, "", None, None
 
     # ------------------------------------------------------------------ #
     # Full-sheet scan                                                     #
     # ------------------------------------------------------------------ #
 
-    def scan_for_blocks(self, templates: list[Block | RecordBlock]) -> MatchOutput:
+    def scan_for_blocks(self, templates: list[Block]) -> MatchOutput:
         opts = self.options
         sr = opts.search_range
 
@@ -708,9 +656,7 @@ class TemplateMatcher:
         for template in templates:
             for r in range(row_start, row_end + 1):
                 for c in range(col_start, col_end + 1):
-                    if isinstance(template, RecordBlock):
-                        result = self._try_match_record_block(r, c, template)
-                    elif template.orientation == "vertical":
+                    if template.orientation == "vertical":
                         result = self._try_match_block_vertical(r, c, template)
                     else:
                         result = self._try_match_block_horizontal(r, c, template)
@@ -736,9 +682,7 @@ class TemplateMatcher:
                         results.append(result)
 
                     elif opts.near_miss_threshold is not None:
-                        if isinstance(template, RecordBlock):
-                            ratio, failed_at, expected, got = self._partial_score_record_block(r, c, template)
-                        elif template.orientation == "vertical":
+                        if template.orientation == "vertical":
                             ratio, failed_at, expected, got = self._partial_score_vertical(r, c, template)
                         else:
                             ratio, failed_at, expected, got = self._partial_score_horizontal(r, c, template)
@@ -763,7 +707,7 @@ class TemplateMatcher:
 
 def match_template(
     file: str | Path,
-    template: "Block | RecordBlock | list[Block | RecordBlock]",
+    template: "Block | list[Block]",
     sheet: "str | int | list[str | int] | None" = 0,
     options: MatchOptions | None = None,
 ) -> MatchOutput:
@@ -791,6 +735,9 @@ def match_template(
 
     # Resolve the list of sheets to scan
     path_str = str(file)
+    wb_xls = None
+    wb_xlsx = None
+    
     if path_str.lower().endswith(".xls"):
         try:
             import xlrd
@@ -799,9 +746,9 @@ def match_template(
                 "excel_extractor requires xlrd for .xls files. "
                 "Install with: pip install xlrd  or  pip install mypkg[excel]"
             )
-        wb = xlrd.open_workbook(path_str, on_demand=True)
+        wb_xls = xlrd.open_workbook(path_str, formatting_info=True)
         if sheet is None or sheet == "*":
-            sheets_to_scan: list[str | int] = wb.sheet_names()
+            sheets_to_scan: list[str | int] = wb_xls.sheet_names()
         elif isinstance(sheet, list):
             sheets_to_scan = sheet
         else:
@@ -814,29 +761,36 @@ def match_template(
                 "excel_extractor requires openpyxl. "
                 "Install with: pip install openpyxl  or  pip install mypkg[excel]"
             )
-        wb = openpyxl.load_workbook(path_str, read_only=True, data_only=True)
+        wb_xlsx = openpyxl.load_workbook(path_str, data_only=True)
         if sheet is None or sheet == "*":
-            sheets_to_scan: list[str | int] = wb.sheetnames
+            sheets_to_scan: list[str | int] = wb_xlsx.sheetnames
         elif isinstance(sheet, list):
             sheets_to_scan = sheet
         else:
             sheets_to_scan = [sheet]
-        wb.close()
 
     merged_results: list = []
     merged_near_misses: list = []
 
-    from mypkg.excel_extractor.normalizer import load_and_normalize_excel as _load
+    from mypkg.excel_extractor.normalizer import _load_xls_from_wb, _load_xlsx_from_wb
 
     for sh in sheets_to_scan:
-        grid, sheet_name = _load(file, sh)
+        if wb_xls is not None:
+            grid, sheet_name = _load_xls_from_wb(wb_xls, sh)
+        else:
+            grid, sheet_name = _load_xlsx_from_wb(wb_xlsx, sh)
+            
         matcher = TemplateMatcher(grid, sheet_name, options)
         output = matcher.scan_for_blocks(templates)
 
         if options.return_mode == "FIRST" and output.results:
+            if wb_xlsx is not None:
+                wb_xlsx.close()
             return output  # stop on first match across all sheets
 
         merged_results.extend(output.results)
         merged_near_misses.extend(output.near_misses)
 
+    if wb_xlsx is not None:
+        wb_xlsx.close()
     return MatchOutput(results=merged_results, near_misses=merged_near_misses)
