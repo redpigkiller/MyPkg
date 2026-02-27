@@ -44,12 +44,14 @@ class MatchResult:
     anchor        : (row, col) of the block's top-left corner, 0-based
     orientation   : 'vertical' or 'horizontal'
     matched_nodes : list of NodeResult in template-declaration order
+    diagnostics   : list of diagnostic messages (e.g., why a repeat='+' stopped)
     """
     block_id:      str | None
     sheet:         str
     anchor:        tuple[int, int]
     orientation:   Literal["vertical", "horizontal"]
     matched_nodes: list[NodeResult]
+    diagnostics:   list[str] = field(default_factory=list)
 
     def __repr__(self) -> str:
         return (

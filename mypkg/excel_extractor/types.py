@@ -38,26 +38,13 @@ class CellCondition:
         # Empty pattern (with matches_none=False) matches nothing for non-None values.
         if not self.pattern:
             return False
+        flags |= re.DOTALL
         return bool(re.fullmatch(self.pattern, str(value), flags))
 
     def __or__(self, other: "CellCondition") -> "CellCondition":
-        # any_val propagates
-        if self.any_val or other.any_val:
-            return CellCondition(
-                pattern="",
-                is_merged=self.is_merged or other.is_merged,
-                any_val=True,
-                matches_none=self.matches_none or other.matches_none,
-            )
-        # Combine patterns; skip empty parts to avoid degenerate alternations
-        parts = [p for p in (self.pattern, other.pattern) if p]
-        combined = f"(?:{'|'.join(f'(?:{p})' for p in parts)})" if parts else ""
-        return CellCondition(
-            pattern=combined,
-            is_merged=self.is_merged or other.is_merged,
-            matches_none=self.matches_none or other.matches_none,
-            # we lose original_str when ORing
-        )
+        if isinstance(self, UnionCellCondition):
+            return UnionCellCondition(self.conditions + [other])
+        return UnionCellCondition([self, other])
 
     def __call__(self, n: int) -> list["CellCondition"]:
         """Syntactic sugar for repeating a condition n times in a row pattern.
@@ -73,6 +60,24 @@ class CellCondition:
         if not isinstance(n, int) or n < 0:
             raise ValueError(f"Repeat count must be a non-negative integer, got {n!r}")
         return [self] * n
+
+
+@dataclass
+class UnionCellCondition(CellCondition):
+    """Combines multiple CellConditions with OR logic."""
+    conditions: list[CellCondition] = field(default_factory=list)
+
+    def __init__(self, conditions: list[CellCondition]):
+        super().__init__(pattern="", matches_none=False, any_val=False, is_merged=False)
+        self.conditions = conditions
+
+    def matches(self, value: str | None, is_merged: bool, *, flags: int = 0) -> bool:
+        return any(c.matches(value, is_merged, flags=flags) for c in self.conditions)
+
+    def __or__(self, other: "CellCondition") -> "CellCondition":
+        if isinstance(other, UnionCellCondition):
+            return UnionCellCondition(self.conditions + other.conditions)
+        return UnionCellCondition(self.conditions + [other])
 
 
 def _literal(s: str) -> CellCondition:

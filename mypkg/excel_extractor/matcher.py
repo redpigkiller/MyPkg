@@ -215,19 +215,19 @@ class TemplateMatcher:
         grid_row: int,
         start_col: int,
         row_node: Row,
-    ) -> list[Any] | None:
+    ) -> tuple[list[Any] | None, str]:
         """Try to match a Row node against grid row *grid_row*.
 
-        Returns the list of extracted cell values, or None on failure.
+        Returns a tuple: (extracted_cells, reason_if_failed).
         """
         pat = row_node.pattern
         if not pat:
-            return []
+            return [], ""
         cells = self.grid.get_row_slice(grid_row, start_col, len(pat))
         if len(cells) < len(pat):
-            return None
+            return None, f"Not enough columns (expected {len(pat)}, got {len(cells)})"
         extracted = []
-        for cell, cond in zip(cells, pat):
+        for i, (cell, cond) in enumerate(zip(cells, pat)):
             if not _cell_matches(
                 cell,
                 cond,
@@ -235,9 +235,9 @@ class TemplateMatcher:
                 fuzzy=row_node.fuzzy,
                 warn_fuzzy=self.options.warn_fuzzy,
             ):
-                return None
+                return None, f"Column {i} (expected {_condition_desc(cond)}) did not match '{cell.value}'"
             extracted.append(cell.original_value)
-        return extracted
+        return extracted, ""
 
     def _try_match_empty_row(
         self,
@@ -245,7 +245,7 @@ class TemplateMatcher:
         start_col: int,
         width: int,
         allow_whitespace: bool,
-    ) -> bool:
+    ) -> tuple[bool, str]:
         """Check if grid row *grid_row* is considered empty."""
         for c in range(start_col, start_col + width):
             cell = self.grid.get_cell(grid_row, c)
@@ -253,31 +253,31 @@ class TemplateMatcher:
                 continue
             cond = Types.EMPTY | Types.SPACE if allow_whitespace else Types.EMPTY
             if not _cell_matches(cell, cond):
-                return False
-        return True
+                return False, f"Column {c - start_col} is not empty (got '{cell.value}')"
+        return True, ""
 
     def _try_match_col(
         self,
         start_row: int,
         grid_col: int,
         col_node: Col,
-    ) -> list[Any] | None:
+    ) -> tuple[list[Any] | None, str]:
         """Try to match a Col node against grid column *grid_col*.
 
-        Returns the list of extracted cell values (top-to-bottom), or None.
+        Returns a tuple: (extracted_cells, reason_if_failed).
         """
         pat = col_node.pattern
         if not pat:
-            return []
+            return [], ""
         cells = self.grid.get_col_slice(start_row, grid_col, len(pat))
         if len(cells) < len(pat):
-            return None
+            return None, f"Not enough rows (expected {len(pat)}, got {len(cells)})"
         extracted = []
-        for cell, cond in zip(cells, pat):
+        for i, (cell, cond) in enumerate(zip(cells, pat)):
             if not _cell_matches(cell, cond, normalize=col_node.normalize, fuzzy=col_node.fuzzy, warn_fuzzy=self.options.warn_fuzzy):
-                return None
+                return None, f"Row {i} (expected {_condition_desc(cond)}) did not match '{cell.value}'"
             extracted.append(cell.original_value)
-        return extracted
+        return extracted, ""
 
     def _try_match_empty_col(
         self,
@@ -312,10 +312,11 @@ class TemplateMatcher:
         """
         cursor = start_row
         matched_nodes: list[NodeResult] = []
+        diagnostics: list[str] = []
         col_width = self._infer_col_width(block, start_col)
 
         for child in block.children:
-            result = self._consume_vertical(child, cursor, start_col, col_width, matched_nodes)
+            result = self._consume_vertical(child, cursor, start_col, col_width, matched_nodes, diagnostics)
             if result is None:
                 return None
             cursor = result
@@ -326,6 +327,7 @@ class TemplateMatcher:
             anchor=(start_row, start_col),
             orientation="vertical",
             matched_nodes=matched_nodes,
+            diagnostics=diagnostics,
         )
 
     def _infer_col_width(self, block: Block, start_col: int) -> int:
@@ -346,6 +348,7 @@ class TemplateMatcher:
         start_col: int,
         col_width: int,
         matched_nodes: list[NodeResult],
+        diagnostics: list[str],
     ) -> int | None:
         """Greedily consume one template node vertically.
 
@@ -355,8 +358,10 @@ class TemplateMatcher:
             count = 0
             rep_min, rep_max = node.repeat_min, node.repeat_max
             while rep_max is None or count < rep_max:
-                extracted = self._try_match_row(cursor, start_col, node)
+                extracted, reason = self._try_match_row(cursor, start_col, node)
                 if extracted is None:
+                    if count >= rep_min and count > 0 and rep_min != rep_max:
+                        diagnostics.append(f"Row(id={node.node_id!r}) stopped at grid row {cursor}: {reason}")
                     break
                 matched_nodes.append(NodeResult(
                     "Row", node.node_id, count, extracted,
@@ -373,8 +378,13 @@ class TemplateMatcher:
             rep_min, rep_max = node.repeat_min, node.repeat_max
             while rep_max is None or count < rep_max:
                 if cursor >= self.grid.num_rows:
+                    if count >= rep_min and count > 0 and rep_min != rep_max:
+                        diagnostics.append(f"EmptyRow(id={node.node_id!r}) stopped at grid row {cursor}: limit reached")
                     break
-                if not self._try_match_empty_row(cursor, start_col, col_width, node.allow_whitespace):
+                is_empty, reason = self._try_match_empty_row(cursor, start_col, col_width, node.allow_whitespace)
+                if not is_empty:
+                    if count >= rep_min and count > 0 and rep_min != rep_max:
+                        diagnostics.append(f"EmptyRow(id={node.node_id!r}) stopped at grid row {cursor}: {reason}")
                     break
                 matched_nodes.append(NodeResult(
                     "EmptyRow", node.node_id, count, [],
@@ -392,9 +402,10 @@ class TemplateMatcher:
             while rep_max is None or group_count < rep_max:
                 saved_cursor = cursor
                 saved_len = len(matched_nodes)
+                saved_diag_len = len(diagnostics)
                 failed = False
                 for child in node.children:
-                    result = self._consume_vertical(child, cursor, start_col, col_width, matched_nodes)
+                    result = self._consume_vertical(child, cursor, start_col, col_width, matched_nodes, diagnostics)
                     if result is None:
                         failed = True
                         break
@@ -402,6 +413,9 @@ class TemplateMatcher:
                 if failed:
                     cursor = saved_cursor
                     del matched_nodes[saved_len:]
+                    del diagnostics[saved_diag_len:]
+                    if group_count >= rep_min and group_count > 0 and rep_min != rep_max:
+                        diagnostics.append(f"Group stopped at grid row {cursor}: inner block failed")
                     break
                 group_count += 1
             if group_count < rep_min:
@@ -426,7 +440,8 @@ class TemplateMatcher:
 
         for i, child in enumerate(block.children):
             dummy: list[NodeResult] = []
-            result = self._consume_vertical(child, cursor, start_col, col_width, dummy)
+            dummy_diag: list[str] = []
+            result = self._consume_vertical(child, cursor, start_col, col_width, dummy, dummy_diag)
             if result is None:
                 child_desc = type(child).__name__
                 if hasattr(child, "node_id") and child.node_id:
@@ -475,10 +490,11 @@ class TemplateMatcher:
         """Attempt to match a horizontal Block anchored at (start_row, start_col)."""
         cursor = start_col
         matched_nodes: list[NodeResult] = []
+        diagnostics: list[str] = []
         row_height = self._infer_row_height(block, start_row)
 
         for child in block.children:
-            result = self._consume_horizontal(child, start_row, cursor, row_height, matched_nodes)
+            result = self._consume_horizontal(child, start_row, cursor, row_height, matched_nodes, diagnostics)
             if result is None:
                 return None
             cursor = result
@@ -489,6 +505,7 @@ class TemplateMatcher:
             anchor=(start_row, start_col),
             orientation="horizontal",
             matched_nodes=matched_nodes,
+            diagnostics=diagnostics,
         )
 
     def _infer_row_height(self, block: Block, start_row: int) -> int:
@@ -509,6 +526,7 @@ class TemplateMatcher:
         cursor: int,
         row_height: int,
         matched_nodes: list[NodeResult],
+        diagnostics: list[str],
     ) -> int | None:
         """Greedily consume one template node horizontally.
 
@@ -518,8 +536,10 @@ class TemplateMatcher:
             count = 0
             rep_min, rep_max = node.repeat_min, node.repeat_max
             while rep_max is None or count < rep_max:
-                extracted = self._try_match_col(start_row, cursor, node)
+                extracted, reason = self._try_match_col(start_row, cursor, node)
                 if extracted is None:
+                    if count >= rep_min and count > 0 and rep_min != rep_max:
+                        diagnostics.append(f"Col(id={node.node_id!r}) stopped at grid col {cursor}: {reason}")
                     break
                 matched_nodes.append(NodeResult(
                     "Col", node.node_id, count, extracted,
@@ -536,8 +556,13 @@ class TemplateMatcher:
             rep_min, rep_max = node.repeat_min, node.repeat_max
             while rep_max is None or count < rep_max:
                 if cursor >= self.grid.num_cols:
+                    if count >= rep_min and count > 0 and rep_min != rep_max:
+                        diagnostics.append(f"EmptyCol(id={node.node_id!r}) stopped at grid col {cursor}: limit reached")
                     break
-                if not self._try_match_empty_col(start_row, cursor, row_height, node.allow_whitespace):
+                is_empty, reason = self._try_match_empty_col(start_row, cursor, row_height, node.allow_whitespace)
+                if not is_empty:
+                    if count >= rep_min and count > 0 and rep_min != rep_max:
+                        diagnostics.append(f"EmptyCol(id={node.node_id!r}) stopped at grid col {cursor}: {reason}")
                     break
                 matched_nodes.append(NodeResult(
                     "EmptyCol", node.node_id, count, [],
@@ -555,9 +580,10 @@ class TemplateMatcher:
             while rep_max is None or group_count < rep_max:
                 saved_cursor = cursor
                 saved_len = len(matched_nodes)
+                saved_diag_len = len(diagnostics)
                 failed = False
                 for child in node.children:
-                    result = self._consume_horizontal(child, start_row, cursor, row_height, matched_nodes)
+                    result = self._consume_horizontal(child, start_row, cursor, row_height, matched_nodes, diagnostics)
                     if result is None:
                         failed = True
                         break
@@ -565,6 +591,9 @@ class TemplateMatcher:
                 if failed:
                     cursor = saved_cursor
                     del matched_nodes[saved_len:]
+                    del diagnostics[saved_diag_len:]
+                    if group_count >= rep_min and group_count > 0 and rep_min != rep_max:
+                        diagnostics.append(f"Group stopped at grid col {cursor}: inner block failed")
                     break
                 group_count += 1
             if group_count < rep_min:
@@ -589,7 +618,8 @@ class TemplateMatcher:
 
         for i, child in enumerate(block.children):
             dummy: list[NodeResult] = []
-            result = self._consume_horizontal(child, start_row, cursor, row_height, dummy)
+            dummy_diag: list[str] = []
+            result = self._consume_horizontal(child, start_row, cursor, row_height, dummy, dummy_diag)
             if result is None:
                 child_desc = type(child).__name__
                 if hasattr(child, "node_id") and child.node_id:
@@ -701,7 +731,7 @@ class TemplateMatcher:
 def match_template(
     file: str | Path,
     template: "Block | list[Block]",
-    sheet: "str | int | list[str | int] | None" = 0,
+    sheet: "str | int | list[str | int] | None" = None,
     options: MatchOptions | None = None,
 ) -> MatchOutput:
     """Extract data from an Excel file using a template description.
@@ -711,7 +741,7 @@ def match_template(
     file     : path to the Excel file
     template : a Block or list of Block objects describing the expected layout
     sheet    : sheet name, 0-based index, list of names/indices, or ``None``
-               to scan **all** sheets (default: first sheet).
+               to scan **all** sheets (default).
                Pass ``"*"`` as an alias for None (scan all sheets).
     options  : MatchOptions instance; defaults to MatchOptions()
 
