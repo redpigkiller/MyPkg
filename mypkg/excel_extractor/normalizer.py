@@ -163,6 +163,15 @@ def load_and_normalize_excel(
     -------
     (grid, sheet_name)
     """
+    path_str = str(file_path)
+    if path_str.lower().endswith(".xls"):
+        return _load_xls(file_path, sheet)
+    return _load_xlsx(file_path, sheet)
+
+def _load_xlsx(
+    file_path: str | Path,
+    sheet: str | int = 0,
+) -> tuple[InternalGrid, str]:
     try:
         import openpyxl
         from openpyxl.cell.cell import MergedCell
@@ -217,6 +226,84 @@ def load_and_normalize_excel(
                     norm_val = orig_val  # keep empty string as-is
                 internal = InternalCell(value=norm_val, original_value=orig_val, is_merged=False)
 
+            row_data.append(internal)
+        grid_cells.append(row_data)
+
+    return InternalGrid(grid_cells), sheet_name
+
+def _load_xls(
+    file_path: str | Path,
+    sheet: str | int = 0,
+) -> tuple[InternalGrid, str]:
+    try:
+        import xlrd
+    except ImportError:
+        raise ImportError(
+            "excel_extractor requires xlrd for .xls files. "
+            "Install with: pip install xlrd  or  pip install mypkg[excel]"
+        )
+
+    wb = xlrd.open_workbook(str(file_path), formatting_info=True)
+
+    if isinstance(sheet, int):
+        sh = wb.sheet_by_index(sheet)
+        sheet_name = sh.name
+    else:
+        sh = wb.sheet_by_name(sheet)
+        sheet_name = sheet
+
+    # Build merge map: (row, col) 0-based -> master (row, col)
+    # xlrd returns merged_cells as list of (row_low, row_high, col_low, col_high)
+    merge_map = {}
+    master_cells = {}
+
+    for crange in sh.merged_cells:
+        rlo, rhi, clo, chi = crange
+        # master is a top-left cell
+        master_coord = (rlo, clo)
+        for rowx in range(rlo, rhi):
+            for colx in range(clo, chi):
+                merge_map[(rowx, colx)] = master_coord
+
+    max_row = sh.nrows
+    max_col = sh.ncols
+
+    grid_cells: list[list[InternalCell]] = []
+    import datetime
+
+    for r in range(max_row):
+        row_data: list[InternalCell] = []
+        for c in range(max_col):
+            is_merged_cell = (r, c) in merge_map and merge_map[(r, c)] != (r, c)
+            
+            if is_merged_cell:
+                mr, mc = merge_map[(r, c)]
+                raw_val = sh.cell_value(rowx=mr, colx=mc)
+                raw_type = sh.cell_type(rowx=mr, colx=mc)
+            else:
+                raw_val = sh.cell_value(rowx=r, colx=c)
+                raw_type = sh.cell_type(rowx=r, colx=c)
+
+            is_date = (raw_type == xlrd.XL_CELL_DATE)
+            if raw_val == "":
+                raw_val = None
+
+            if raw_val is not None and is_date:
+                try:
+                    dt_tuple = xlrd.xldate_as_tuple(raw_val, wb.datemode)
+                    raw_val = datetime.datetime(*dt_tuple)
+                except Exception:
+                    pass
+            
+            orig_val = raw_val
+            
+            proxy = _MergedCellProxy(value=raw_val)
+            norm_val, _ = _normalise_value(proxy, is_date)
+
+            if orig_val == "" or (isinstance(orig_val, str) and orig_val.strip() == "" and orig_val != ""):
+                norm_val = orig_val
+
+            internal = InternalCell(value=norm_val, original_value=orig_val, is_merged=is_merged_cell)
             row_data.append(internal)
         grid_cells.append(row_data)
 

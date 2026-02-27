@@ -40,7 +40,7 @@ from typing import Any
 
 from mypkg.excel_extractor.types import CellCondition, Types
 from mypkg.excel_extractor.template import (
-    Block, Col, EmptyCol, EmptyRow, Group, Row, TemplateNode,
+    Block, Col, EmptyCol, EmptyRow, Group, Row, TemplateNode, RecordBlock,
 )
 from mypkg.excel_extractor.result import (
     MatchOptions, MatchOutput, MatchResult, NearMissHint, NodeResult,
@@ -115,12 +115,14 @@ def _condition_desc(cond: CellCondition) -> str:
 # Area estimator for consumption-mask sort
 # ---------------------------------------------------------------------------
 
-def _estimate_area(block: Block) -> int:
+def _estimate_area(block: Block | RecordBlock) -> int:
     """Return a rough area estimate (rows × cols) for sort-ordering purposes.
 
     Counts only the minimum required repetitions so that optional nodes
     do not artificially inflate the estimate.
     """
+    if isinstance(block, RecordBlock):
+        return (1 + block.repeat_min) * len(block.fields)
     if block.orientation == "vertical":
         rows = sum(
             c.repeat_min if hasattr(c, "repeat_min") else 1
@@ -575,10 +577,118 @@ class TemplateMatcher:
         return None, None
 
     # ------------------------------------------------------------------ #
+    # Block matching (RecordBlock)                                        #
+    # ------------------------------------------------------------------ #
+
+    def _try_match_record_block(
+        self,
+        start_row: int,
+        start_col: int,
+        block: RecordBlock,
+    ) -> MatchResult | None:
+        cells = self.grid.get_row_slice(start_row, start_col, self.grid.num_cols - start_col)
+        
+        col_mapping: dict[int, int] = {}
+        used_cols = set()
+        
+        for i, f in enumerate(block.fields):
+            found_col = -1
+            for c_offset, cell in enumerate(cells):
+                if c_offset in used_cols:
+                    continue
+                if _cell_matches(cell, f.header):
+                    found_col = start_col + c_offset
+                    break
+            if found_col == -1:
+                return None
+            col_mapping[i] = found_col
+            used_cols.add(c_offset)
+
+        matched_nodes = []
+        matched_nodes.append(NodeResult(
+            "Row", "header", 0, [f.name for f in block.fields],
+            grid_row=start_row, grid_col=start_col
+        ))
+        
+        count = 0
+        cursor = start_row + 1
+        rep_min, rep_max = block.repeat_min, block.repeat_max
+        
+        while rep_max is None or count < rep_max:
+            if cursor >= self.grid.num_rows:
+                break
+                
+            extracted = []
+            row_matches = True
+            for i, f in enumerate(block.fields):
+                grid_col = col_mapping[i]
+                cell = self.grid.get_cell(cursor, grid_col)
+                if cell is None:
+                    cell = InternalCell(value=None, original_value=None, is_merged=False)
+                if not _cell_matches(cell, f.pattern):
+                    row_matches = False
+                    break
+                extracted.append(cell.original_value)
+                
+            if not row_matches:
+                break
+                
+            matched_nodes.append(NodeResult(
+                "Row", "data", count, extracted,
+                grid_row=cursor, grid_col=start_col
+            ))
+            count += 1
+            cursor += 1
+            
+        if count < rep_min:
+            return None
+            
+        return MatchResult(
+            block_id=block.block_id,
+            sheet=self.sheet_name,
+            anchor=(start_row, start_col),
+            orientation="vertical",
+            matched_nodes=matched_nodes,
+        )
+
+    def _partial_score_record_block(
+        self, start_row: int, start_col: int, block: RecordBlock
+    ) -> tuple[float, str, str | None, str | None]:
+        # Count matched headers vs total fields
+        cells = self.grid.get_row_slice(start_row, start_col, self.grid.num_cols - start_col)
+        used_cols = set()
+        matched_headers = 0
+        failed_header = None
+        
+        for i, f in enumerate(block.fields):
+            found_col = -1
+            for c_offset, cell in enumerate(cells):
+                if c_offset in used_cols:
+                    continue
+                if _cell_matches(cell, f.header):
+                    found_col = start_col + c_offset
+                    break
+            if found_col != -1:
+                matched_headers += 1
+                used_cols.add(c_offset)
+            elif failed_header is None:
+                failed_header = f
+
+        if matched_headers < len(block.fields):
+            return (
+                matched_headers / len(block.fields), 
+                f"Header '{failed_header.name}' not found",
+                _condition_desc(failed_header.header),
+                None
+            )
+
+        return 1.0, "", None, None
+
+    # ------------------------------------------------------------------ #
     # Full-sheet scan                                                     #
     # ------------------------------------------------------------------ #
 
-    def scan_for_blocks(self, templates: list[Block]) -> MatchOutput:
+    def scan_for_blocks(self, templates: list[Block | RecordBlock]) -> MatchOutput:
         opts = self.options
         sr = opts.search_range
 
@@ -598,7 +708,9 @@ class TemplateMatcher:
         for template in templates:
             for r in range(row_start, row_end + 1):
                 for c in range(col_start, col_end + 1):
-                    if template.orientation == "vertical":
+                    if isinstance(template, RecordBlock):
+                        result = self._try_match_record_block(r, c, template)
+                    elif template.orientation == "vertical":
                         result = self._try_match_block_vertical(r, c, template)
                     else:
                         result = self._try_match_block_horizontal(r, c, template)
@@ -624,7 +736,9 @@ class TemplateMatcher:
                         results.append(result)
 
                     elif opts.near_miss_threshold is not None:
-                        if template.orientation == "vertical":
+                        if isinstance(template, RecordBlock):
+                            ratio, failed_at, expected, got = self._partial_score_record_block(r, c, template)
+                        elif template.orientation == "vertical":
                             ratio, failed_at, expected, got = self._partial_score_vertical(r, c, template)
                         else:
                             ratio, failed_at, expected, got = self._partial_score_horizontal(r, c, template)
@@ -649,7 +763,7 @@ class TemplateMatcher:
 
 def match_template(
     file: str | Path,
-    template: "Block | list[Block]",
+    template: "Block | RecordBlock | list[Block | RecordBlock]",
     sheet: "str | int | list[str | int] | None" = 0,
     options: MatchOptions | None = None,
 ) -> MatchOutput:
@@ -676,21 +790,38 @@ def match_template(
     templates = template if isinstance(template, list) else [template]
 
     # Resolve the list of sheets to scan
-    try:
-        import openpyxl
-    except ImportError:
-        raise ImportError(
-            "excel_extractor requires openpyxl. "
-            "Install with: pip install openpyxl  or  pip install mypkg[excel]"
-        )
-    wb = openpyxl.load_workbook(str(file), data_only=True)
-
-    if sheet is None or sheet == "*":
-        sheets_to_scan: list[str | int] = wb.sheetnames
-    elif isinstance(sheet, list):
-        sheets_to_scan = sheet
+    path_str = str(file)
+    if path_str.lower().endswith(".xls"):
+        try:
+            import xlrd
+        except ImportError:
+            raise ImportError(
+                "excel_extractor requires xlrd for .xls files. "
+                "Install with: pip install xlrd  or  pip install mypkg[excel]"
+            )
+        wb = xlrd.open_workbook(path_str, on_demand=True)
+        if sheet is None or sheet == "*":
+            sheets_to_scan: list[str | int] = wb.sheet_names()
+        elif isinstance(sheet, list):
+            sheets_to_scan = sheet
+        else:
+            sheets_to_scan = [sheet]
     else:
-        sheets_to_scan = [sheet]
+        try:
+            import openpyxl
+        except ImportError:
+            raise ImportError(
+                "excel_extractor requires openpyxl. "
+                "Install with: pip install openpyxl  or  pip install mypkg[excel]"
+            )
+        wb = openpyxl.load_workbook(path_str, read_only=True, data_only=True)
+        if sheet is None or sheet == "*":
+            sheets_to_scan: list[str | int] = wb.sheetnames
+        elif isinstance(sheet, list):
+            sheets_to_scan = sheet
+        else:
+            sheets_to_scan = [sheet]
+        wb.close()
 
     merged_results: list = []
     merged_near_misses: list = []

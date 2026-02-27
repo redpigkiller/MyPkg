@@ -167,6 +167,33 @@ class MatchResult:
                 df.index = columns
             return df.T.reset_index(drop=True)
 
+    def to_models(self, model_cls: type) -> list[Any]:
+        """Convert matched data rows into Pydantic models.
+        
+        Requires that the matched block had a header row (e.g., from a RecordBlock
+        or explicitly specifying header_node if from a generic Block). 
+        The first row must contain the field names matching the model's fields.
+        
+        Parameters
+        ----------
+        model_cls : A pydantic BaseModel class
+        """
+        nodes = self.data_nodes()
+        if not nodes:
+            return []
+            
+        header = nodes[0]
+        data_rows = nodes[1:]
+        
+        fields = [str(c) if c is not None else "" for c in header.cells]
+        
+        models = []
+        for row in data_rows:
+            record = dict(zip(fields, row.cells))
+            models.append(model_cls(**record))
+            
+        return models
+
     def to_dict(self) -> dict:
         """Convert the result to a plain dict (JSON-serialisable types only)."""
         return {

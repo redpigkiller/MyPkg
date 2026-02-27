@@ -17,8 +17,12 @@ dependencies = []
 [project.optional-dependencies]
 math = ["fxpmath"]
 rich = ["rich"]
-excel = ["openpyxl"]
+excel = ["openpyxl", "xlrd"]
 cfg = ["networkx>=3.0"]
+all = ["fxpmath", "rich", "openpyxl", "xlrd", "networkx>=3.0"]
 
 [tool.setuptools.packages.find]
 include = ["mypkg*"]
+
+[tool.setuptools]
+include-package-data = true

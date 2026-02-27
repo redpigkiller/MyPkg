@@ -14,9 +14,17 @@
 python -m venv venv
 # Windows: venv\Scripts\activate | Mac/Linux: source venv/bin/activate
 pip install -e .          # 僅核心功能
-pip install -e .[math]    # 完整功能 (包含 NumBV 與 NumBVArray)
-pip install -e .[excel]   # Excel Extractor（加入 openpyxl）
+pip install -e .[all]     # 完整功能 (包含所有選購相依性)
+pip install -e .[math]    # 僅定點數功能 (包含 NumBV 與 NumBVArray)
+pip install -e .[excel]   # 僅 Excel Extractor（加入 openpyxl）
 pytest -q                 # 執行測試
+```
+
+> [!TIP]
+> **IDE 與開發建議**：
+> 如果您的 IDE（如 VS Code/Pylance）無法正確顯示 Type Hint 或出現 `__editable__` 虛擬模組：
+> 1. 確保已安裝 `pip install -e .`
+> 2. 如果問題持續，請嘗試相容模式：`pip install -e . --config-settings editable_mode=compat`
 ```
 
 ---
@@ -115,13 +123,38 @@ template = Block(
 output = match_template("report.xlsx", template)
 result = output.results[0]
 
-# 每個比對列的精確工作表座標
+# 獲得每個符合資料列的絕對座標
 for node in result.data_nodes():
-    print(node.grid_row, node.cells)  # → 絕對行號 + [部門, 姓名, 月薪]
+    print(node.grid_row, node.cells)  # → absolute row + [dept, name, salary]
 
-# 以 ID 找到特定列，之後可用座標寫回 Excel
+# 透過 id 尋找特定的列，並可於日後寫回
 third = result.find_node("data", repeat_index=2)
-print(third.grid_row, third.grid_col)  # → 工作表上的精確 (row, col)
+print(third.grid_row, third.grid_col)  # → sheet 中的確切 (row, col) 座標
+```
+
+### 動態欄位擷取 (`RecordBlock`)
+
+當你需要處理包含大量欄位的表格，但只關心特定幾個欄位，且欄位順序可能變更時使用：
+
+```python
+from pydantic import BaseModel
+from mypkg.excel_extractor import match_template, RecordBlock, Field, Types
+
+class Employee(BaseModel):
+    name: str
+    salary: int
+
+# 只要表頭符合設定的名稱，就能自動找出對應的欄位索引並擷取
+template = RecordBlock(
+    Field(header="姓名", pattern=Types.STR, name="name"),
+    Field(header="月薪", pattern=Types.INT, name="salary"),
+)
+
+output = match_template("report.xls", template)
+
+# 利用 to_models 直接轉換為 Pydantic Model
+employees = output.results[0].to_models(Employee)
+print(employees[0].name, employees[0].salary)
 ```
 
 ---

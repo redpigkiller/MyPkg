@@ -14,7 +14,8 @@ A lightweight Python toolkit for IC design & verification engineers.
 python -m venv venv
 # Windows: venv\Scripts\activate | Mac/Linux: source venv/bin/activate
 pip install -e .          # Core features only
-pip install -e .[math]    # Full features (NumBV & NumBVArray)
+pip install -e .[all]     # Full features (all optional dependencies)
+pip install -e .[math]    # Math features (NumBV & NumBVArray)
 pip install -e .[excel]   # Excel Extractor (adds openpyxl)
 pytest -q                 # Run tests
 ```
@@ -122,6 +123,28 @@ for node in result.data_nodes():
 # Find a specific row by id and write back later
 third = result.find_node("data", repeat_index=2)
 print(third.grid_row, third.grid_col)  # → exact (row, col) in the sheet
+```
+
+### Dynamic Column Extraction (`RecordBlock`)
+
+For sparse matching of many columns (e.g. searching headers by name in any order):
+
+```python
+from pydantic import BaseModel
+from mypkg.excel_extractor import match_template, RecordBlock, Field, Types
+
+class Employee(BaseModel):
+    name: str
+    salary: int
+
+template = RecordBlock(
+    Field(header="姓名", pattern=Types.STR, name="name"),
+    Field(header="月薪", pattern=Types.INT, name="salary"),
+)
+
+output = match_template("report.xls", template)
+employees = output.results[0].to_models(Employee)
+print(employees[0].name, employees[0].salary)
 ```
 
 ---
