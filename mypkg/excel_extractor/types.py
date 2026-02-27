@@ -27,7 +27,7 @@ class CellCondition:
     matches_none: bool = False
     original_str: str | None = None
 
-    def matches(self, value: str | None, is_merged: bool) -> bool:
+    def matches(self, value: str | None, is_merged: bool, *, flags: int = 0) -> bool:
         """Return True if a normalised InternalCell satisfies this condition."""
         if self.is_merged and not is_merged:
             return False
@@ -38,7 +38,7 @@ class CellCondition:
         # Empty pattern (with matches_none=False) matches nothing for non-None values.
         if not self.pattern:
             return False
-        return bool(re.fullmatch(self.pattern, str(value)))
+        return bool(re.fullmatch(self.pattern, str(value), flags))
 
     def __or__(self, other: "CellCondition") -> "CellCondition":
         # any_val propagates

@@ -107,16 +107,9 @@ def _cell_matches(
 
     # If it's not a fuzzy match, just use the built-in matcher
     if not fuzzy or not condition.pattern or condition.any_val or condition.matches_none or condition.is_merged:
-        if normalize and val is not None and condition.pattern:
-            # For normalized matching of strings, we also need to normalize the pattern if it's literal-like
-            # Since CellCondition pattern is a regex, lowercasing it might be tricky, but we can try ignoring case using (?i)
-            # A simpler way is to let the Condition handle it, but for our simple literals, we can just lowercase the pattern if no regex special chars.
-            # However, for robustness, we use rapidfuzz if available or just let CellCondition.matches handle it.
-            # If normalize is true, we should pass (?i) to regex?
-            # Actually, types.py doesn't have an easy way. Let's just pass the normalized value.
-            pass
-            
-        return condition.matches(val, cell.is_merged)
+        import re as _re
+        flags = _re.IGNORECASE if normalize else 0
+        return condition.matches(val, cell.is_merged, flags=flags)
     
     # Fuzzy matching requires rapidfuzz
     try:

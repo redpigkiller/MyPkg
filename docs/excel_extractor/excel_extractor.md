@@ -47,8 +47,8 @@ output = match_template("report.xlsx", template)
 
 for result in output.results:
     print(result.anchor)                             # (row, col) where block was found
-    df = result.to_dataframe(header_node="header")  # use header cells as column names
-    print(df)
+    records = result.to_dict(header_node="header")   # use header cells as dict keys
+    print(records)
 ```
 
 ---
@@ -166,7 +166,6 @@ result.anchor           # (row, col) — 0-based top-left corner
 result.bounding_box     # (r1, c1, r2, c2) — inclusive bounding box
 result.matched_nodes    # list[NodeResult] — all matched nodes
 result.data_nodes()     # list[NodeResult] — excludes EmptyRow / EmptyCol
-result.to_dataframe()   # convert to pandas DataFrame
 result.to_dict()        # convert to plain dict (JSON-serialisable)
 ```
 
@@ -204,18 +203,18 @@ for row in rows:
 > `find_nodes` is the natural choice for `repeat="+"` or `repeat="*"` nodes —
 > no need to know the count in advance.
 
-### `to_dataframe` — Named columns
+### `to_dict` — Named keys (list of dicts)
 
-Pass a `node_id` to use that node's cell values as DataFrame column names
+Pass a `node_id` to use that node's cell values as dictionary keys
 (that node is excluded from the data rows):
 
 ```python
 # header row has node_id="header", data rows have node_id="data"
-df = result.to_dataframe(header_node="header")
-# → DataFrame columns = values from the header row
+records = result.to_dict(header_node="header")
+# → [{"Dept": "IT", "Name": "Alice", "Salary": 50000}, ...]
 ```
 
-Without `header_node`, columns are integer indices `0, 1, 2, ...`.
+Without `header_node`, returns a full structural dump of the `MatchResult`.
 
 ---
 

@@ -4,12 +4,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-try:
-    import pandas as pd
-    _HAS_PANDAS = True
-except ImportError:
-    _HAS_PANDAS = False
-
 
 @dataclass
 class NodeResult:
@@ -128,74 +122,20 @@ class MatchResult:
             key=lambda n: n.repeat_index,
         )
 
-    def to_dataframe(self, header_node: str | None = None):
-        """Convert matched data to a pandas DataFrame.
+    def to_dict(self, header_node: str | None = None) -> dict | list[dict]:
+        """Convert the result to plain Python types.
 
-        Parameters
-        ----------
-        header_node : optional node_id whose cells will be used as DataFrame
-            column names (vertical) or index (horizontal).  That node is
-            excluded from the data rows.
-
-        vertical   → each data NodeResult is a row
-        horizontal → each data NodeResult is a column (result is transposed)
-
-        Raises ImportError if pandas is not installed.
+        Without header_node: returns the full structural dump.
+        With header_node: returns list[dict] using that node's cells as keys.
         """
-        if not _HAS_PANDAS:
-            raise ImportError(
-                "to_dataframe() requires pandas. "
-                "Install with: pip install pandas"
-            )
-        nodes = self.data_nodes()
-        if not nodes:
-            return pd.DataFrame()
-
-        columns = None
         if header_node is not None:
             header = self.find_node(header_node)
-            if header is not None:
-                columns = [str(c) if c is not None else "" for c in header.cells]
-                nodes = [n for n in nodes if n.node_id != header_node]
+            if header is None:
+                raise ValueError(f"header_node {header_node!r} not found in matched nodes")
+            keys = [str(c) if c is not None else "" for c in header.cells]
+            rows = [n for n in self.data_nodes() if n.node_id != header_node]
+            return [dict(zip(keys, row.cells)) for row in rows]
 
-        data = [n.cells for n in nodes]
-        if self.orientation == "vertical":
-            return pd.DataFrame(data, columns=columns)
-        else:
-            df = pd.DataFrame(data)
-            if columns is not None:
-                df.index = columns
-            return df.T.reset_index(drop=True)
-
-    def to_models(self, model_cls: type) -> list[Any]:
-        """Convert matched data rows into Pydantic models.
-        
-        Requires that the matched block had a header row (e.g., explicitly
-        specifying header_node if from a generic Block). 
-        The first row must contain the field names matching the model's fields.
-        
-        Parameters
-        ----------
-        model_cls : A pydantic BaseModel class
-        """
-        nodes = self.data_nodes()
-        if not nodes:
-            return []
-            
-        header = nodes[0]
-        data_rows = nodes[1:]
-        
-        fields = [str(c) if c is not None else "" for c in header.cells]
-        
-        models = []
-        for row in data_rows:
-            record = dict(zip(fields, row.cells))
-            models.append(model_cls(**record))
-            
-        return models
-
-    def to_dict(self) -> dict:
-        """Convert the result to a plain dict (JSON-serialisable types only)."""
         return {
             "block_id": self.block_id,
             "sheet": self.sheet,
@@ -280,6 +220,8 @@ class MatchOptions:
                               Prevents small templates from matching inside
                               regions already claimed by larger blocks.
                               Default: False (original behaviour).
+    warn_fuzzy              : if True, emit a warning when a fuzzy match triggers
+                              (similarity < 1.0). Default: True.
     """
     return_mode:             Literal["FIRST", "ALL"] = "ALL"
     near_miss_threshold:     float | None = None

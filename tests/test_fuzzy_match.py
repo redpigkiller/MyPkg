@@ -5,6 +5,13 @@ from mypkg.excel_extractor.matcher import _cell_matches
 from mypkg.excel_extractor.normalizer import InternalCell
 
 class TestRowNormalizeFuzzy(unittest.TestCase):
+    def setUp(self):
+        try:
+            import rapidfuzz
+            self._rapidfuzz_available = True
+        except ImportError:
+            self._rapidfuzz_available = False
+
     def test_normalize_default(self):
         row = Row([Types.r("hello world")], normalize=True)
         # Assuming internal cell matches " Hello World " with "hello world"
@@ -15,6 +22,9 @@ class TestRowNormalizeFuzzy(unittest.TestCase):
         self.assertFalse(_cell_matches(cell, cond, normalize=False))
         
     def test_fuzzy_match(self):
+        if not self._rapidfuzz_available:
+            self.skipTest("rapidfuzz not installed")
+
         row = Row(["Employee Name", "Salary"], fuzzy=0.8)
         cond1 = row.pattern[0]
         

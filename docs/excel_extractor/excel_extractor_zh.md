@@ -46,9 +46,9 @@ template = Block(
 output = match_template("report.xlsx", template)
 
 for result in output.results:
-    print(result.anchor)        # (row, col) 找到的位置
-    df = result.to_dataframe(header_node="header")  # 以標題列欄名命名
-    print(df)
+    print(result.anchor)                             # (row, col) 找到的 Block 左上角座標
+    records = result.to_dict(header_node="header")   # 用標題列的值當字典鍵
+    print(records)
 ```
 
 ---
@@ -162,7 +162,6 @@ result.anchor           # (row, col) — 0-based 左上角座標
 result.bounding_box     # (r1, c1, r2, c2) — 含首尾的完整範圍
 result.matched_nodes    # list[NodeResult] — 所有已比對節點
 result.data_nodes()     # list[NodeResult] — 排除 EmptyRow / EmptyCol
-result.to_dataframe()   # 轉換為 pandas DataFrame
 result.to_dict()        # 轉換為純 dict（可 JSON 序列化）
 ```
 
@@ -199,17 +198,17 @@ for row in rows:
 
 > `find_nodes` 特別適合 `repeat="+"` 或 `repeat="*"` 的節點，省去手動用 index 逐一取的麻煩。
 
-### `to_dataframe` — 指定欄名
+### `to_dict` — 取出為多筆字典資料 (Records)
 
-使用某個 `node_id` 的 `cells` 作為 DataFrame 的欄名（該節點本身不會出現在資料列中）：
+使用 `node_id`，讓該節點的 `cells` 作為字典的 keys（該節點本身會從結果資料列中排除）：
 
 ```python
 # 標題列 node_id="header"，資料列 node_id="data"
-df = result.to_dataframe(header_node="header")
-# → DataFrame 欄名 = 標題列的格子值
+records = result.to_dict(header_node="header")
+# → [{"Dept": "IT", "Name": "Alice", "Salary": 50000}, ...]
 ```
 
-不指定時，欄名為 `0, 1, 2, ...`（整數索引）。
+如果不指定 `header_node`，則會回傳整個結構的原始 dump。
 
 ---
 

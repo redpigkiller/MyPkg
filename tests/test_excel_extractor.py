@@ -853,17 +853,10 @@ class TestIsRowAllEmpty(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# 16. to_dataframe with header_node
+# 16. to_dict with header_node
 # ---------------------------------------------------------------------------
 
-class TestToDataframeWithHeader(unittest.TestCase):
-
-    def setUp(self):
-        try:
-            import pandas
-            self._pandas_available = True
-        except ImportError:
-            self._pandas_available = False
+class TestToDictWithHeaderNode(unittest.TestCase):
 
     def _make_result(self):
         grid = make_grid([
@@ -877,22 +870,19 @@ class TestToDataframeWithHeader(unittest.TestCase):
         )
         return make_matcher(grid)._try_match_block_vertical(0, 0, block)
 
-    def test_to_dataframe_with_header_node(self):
-        if not self._pandas_available:
-            self.skipTest("pandas not installed")
+    def test_to_dict_with_header_node(self):
         result = self._make_result()
-        df = result.to_dataframe(header_node="header")
-        self.assertEqual(list(df.columns), ["部門", "姓名", "月薪"])
-        self.assertEqual(len(df), 2)   # 2 data rows (header excluded)
+        records = result.to_dict(header_node="header")
+        self.assertEqual(len(records), 2)
+        self.assertEqual(records[0], {"部門": "IT", "姓名": "Alice", "月薪": 1000})
+        self.assertEqual(records[1], {"部門": "HR", "姓名": "Bob", "月薪": 2000})
 
-    def test_to_dataframe_default_no_column_names(self):
-        if not self._pandas_available:
-            self.skipTest("pandas not installed")
+    def test_to_dict_default(self):
         result = self._make_result()
-        df = result.to_dataframe()
-        # Default: integer column indices
-        self.assertEqual(list(df.columns), [0, 1, 2])
-        self.assertEqual(len(df), 3)   # header + 2 data rows
+        d = result.to_dict()
+        self.assertIn("matched_nodes", d)
+        self.assertIn("anchor", d)
+        self.assertEqual(len(d["matched_nodes"]), 3) # header + 2 data
 
 
 # ---------------------------------------------------------------------------
