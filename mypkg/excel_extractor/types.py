@@ -18,7 +18,7 @@ class CellCondition:
     """
 
     patterns: frozenset[str]
-    is_merged: bool = False
+    is_merged: bool | None = None   # None = dont' case
 
     @classmethod
     def from_pattern(cls, pattern: str, *, is_merged: bool = False) -> "CellCondition":
@@ -27,11 +27,13 @@ class CellCondition:
         return cls(frozenset([pattern]), is_merged)
     
     def __or__(self, other: "CellCondition") -> "CellCondition":
-        return CellCondition(
-            patterns=self.patterns | other.patterns,
-            is_merged=self.is_merged or other.is_merged,
-        )
-    
+        merged_patterns = self.patterns | other.patterns
+        if self.is_merged == other.is_merged:
+            is_merged = self.is_merged
+        else:
+            is_merged = None
+        
+        return CellCondition(patterns=merged_patterns, is_merged=is_merged)
     def __call__(self, n: int) -> list["CellCondition"]:
         """Syntactic sugar for repeating a condition n times in a row pattern."""
         if not isinstance(n, int) or n < 0:

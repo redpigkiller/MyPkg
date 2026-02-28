@@ -1,38 +1,3 @@
-"""Template Matcher — PEG greedy matching engine.
-Strategy
-
---------
-Every `repeat` node is matched greedily: consume as many instances as
-possible (up to repeat_max), then stop.  There is no backtracking.
-
-Matching is strict: a row/col either matches its pattern exactly or the
-entire block fails at that anchor.  To handle expected blank rows in the
-data, declare them explicitly using EmptyRow / EmptyCol nodes in the template.
-
-.. warning::
-    All ``repeat`` specs are **greedy and non-backtracking**.  If a ``"+"``
-    or ``"*"`` node is immediately followed by another node whose pattern
-    overlaps, the greedy node may consume rows that the following node
-    needs.  Design patterns so that adjacent nodes match non-overlapping
-    cell types.
-
-Near-miss hints
----------------
-When MatchOptions.near_miss_threshold is set, failed block anchors are
-re-evaluated to count how many top-level children matched before the
-first failure.  If the ratio meets the threshold, a NearMissHint is
-emitted — useful for debugging template mismatches without affecting the
-main matching flow.
-
-Consumption mask
-----------------
-When MatchOptions.consume_matched_regions is True, templates are sorted
-by estimated area (largest first).  Once a block is matched, every cell
-in its bounding box is marked consumed and will not be claimed again.
-This prevents small templates from matching inside regions already owned
-by larger blocks.
-"""
-
 from __future__ import annotations
 from pathlib import Path
 from typing import Any, Literal
@@ -53,10 +18,9 @@ from mypkg.excel_extractor.template import (
 )
 from mypkg.excel_extractor.result import (
     MatchOptions,
-    MatchOutput,
-    MatchResult,
-    NearMissHint,
-    NodeResult,
+    CellMatch,
+    RowMatch,
+    BlockMatch
 )
 from mypkg.excel_extractor.normalizer import InternalCell, InternalGrid
 from mypkg.excel_extractor.normalizer import _load_xls_from_wb, _load_xlsx_from_wb
@@ -66,24 +30,47 @@ from mypkg.excel_extractor.normalizer import _load_xls_from_wb, _load_xlsx_from_
 # TemplateMatcher
 # ---------------------------------------------------------------------------
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class CompiledCellCondition:
     pattern: str | re.Pattern
-    is_merged: bool = False
-
-
-@dataclass(frozen=True)
-class CompiledRule:
-    rules: tuple[CompiledCellCondition, ...]
+    is_merged: bool | None
     normalize: bool
-    min_similarity: float | None
-    match_ratio: float | None
+    min_similarity : float | None
 
-@dataclass
+
+@dataclass(frozen=True, slots=True)
+class CompiledCellConditionId:
+    value: int
+    def __repr__(self) -> str:
+        return f"CId({self.value})"
+
+
+@dataclass(frozen=True, slots=True)
+class CompiledRule:
+    rules: tuple[CompiledCellConditionId, ...]
+    match_ratio: float | None
+    node_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class CompiledRuleId:
+    value: int
+    def __repr__(self) -> str:
+        return f"RId({self.value})"
+    
+    @property
+    def symbol(self) -> str:
+        return chr(0xF0000 + self.value)
+
+
+@dataclass(frozen=True, slots=True)
 class CompiledTemplate:
     regex: re.Pattern
-    symbol_map: dict[str, CompiledRule]
+    rule_id_map: dict[CompiledRuleId, CompiledRule]
+    cond_id_map_rv: dict[CompiledCellCondition, CompiledCellConditionId]
     width: int
+    block_id: str | None
+
 
 class TemplateMatcher:
     """Matches one or more Block templates against an InternalGrid."""
@@ -92,14 +79,16 @@ class TemplateMatcher:
         self.templates = templates
         self.options = options
 
-        self.compiled_templates = []
+        self.compiled_templates: list[CompiledTemplate] = []
         for template in self.templates:
-            regex, symbol_map = self._compile(template)
+            regex, rule_id_map, cond_id_map_rv = self._compile(template)
             self.compiled_templates.append(
                 CompiledTemplate(
                     regex=re.compile(regex),
-                    symbol_map=symbol_map,
-                    width=template.width
+                    rule_id_map=rule_id_map,
+                    cond_id_map_rv=cond_id_map_rv,
+                    width=template.width,
+                    block_id=template.block_id,
                 )
             )
             
@@ -107,116 +96,184 @@ class TemplateMatcher:
     # Match Parts
     # ------------------------------------------------------------------
 
-    def scan_for_blocks(self, grid: InternalGrid) -> list[tuple[int, int]]:
-        match_result = []
+    def scan_for_blocks(self, grid: InternalGrid) -> list[list[BlockMatch]]:
+        match_results = []
         for compiled_template in self.compiled_templates:
-            template_regex = compiled_template.regex
-            symbol_map = compiled_template.symbol_map
+            cid_grid = self._match_grid(grid, compiled_template.cond_id_map_rv)
             width = compiled_template.width
 
-            match_positions = []
+            # Search for matches
+            match_result: list[BlockMatch] = []
             for i in range(grid.num_rows):
                 for j in range(grid.num_cols - width + 1):
-                    sub_grid = grid[i:, j:j + width]
-                    if self._match_template(sub_grid, template_regex, symbol_map):
-                        match_positions.append((i, j))
-            match_result.append(match_positions)
-        return match_result
+                    sub_cid_grid = [row[j:j+width] for row in cid_grid[i:]]
 
-    def _match_template(self, sub_grid: list[list[InternalCell]], template_regex: str, symbol_map: dict[str, CompiledRule]) -> bool:
-        # Step 1: scan each row → symbol or None
-        symbol_sequence = []
-        for row in sub_grid:
-            symbol = self._match_row(row, symbol_map)
-            if symbol is not None:
-                symbol_sequence.append(symbol)
+                    is_match, match_group = self._match_template(sub_cid_grid, compiled_template)
+                    if is_match:
+                        match_result.append(
+                            self._build_match_result(grid, (i, j), match_group, compiled_template)
+                        )
+            match_results.append(match_result)
+        return match_results
+
+    def _match_grid(
+            self,
+            grid: InternalGrid,
+            cond_id_map_rv: dict[CompiledCellCondition, CompiledCellConditionId]
+    ) -> list[list[set[CompiledCellConditionId]]]:
+        cid_grid = []
+        for i in range(grid.num_rows):
+            cid_row = []
+            for j in range(grid.num_cols):
+                cid_set = set()
+                for cell_condition, cell_condition_id in cond_id_map_rv.items():
+                    if self._cell_matches(grid.get_cell(i, j), cell_condition):
+                        cid_set.add(cell_condition_id)
+                cid_row.append(cid_set)
+            cid_grid.append(cid_row)
+        return cid_grid
+
+    def _cell_matches(self, cell: InternalCell, rule: CompiledCellCondition) -> bool:
+        if rule.is_merged is None:
+            if cell.is_merged:
+                return True
+        else:
+            if rule.is_merged != cell.is_merged:
+                return False
         
-        # Step 2: join and regex match
-        joined = "".join(symbol_sequence)
-        return bool(re.match(template_regex, joined))
-
-    def _match_row(self, row: list[InternalCell], symbol_map: dict[str, CompiledRule]) -> str | None:
-        """Try to match a row against all compiled rules. Return symbol char or None."""
-        for symbol, compiled_rule in symbol_map.items():
-            if self._row_matches_rule(row, compiled_rule):
-                return symbol
-        return None
-
-    def _row_matches_rule(self, row: list[InternalCell], compiled_rule: CompiledRule) -> bool:
-        if len(row) != len(compiled_rule.rules):
-            return False
-
-        matched = 0
-        for cell, rule in zip(row, compiled_rule.rules):
-            if self._cell_matches(cell, rule, compiled_rule.normalize, compiled_rule.min_similarity):
-                matched += 1
-
-        if compiled_rule.match_ratio is not None:
-            return (matched / len(row)) >= compiled_rule.match_ratio
-        return matched == len(row)
-
-    def _cell_matches(
-        self,
-        cell: InternalCell,
-        rule: CompiledCellCondition,
-        normalize: bool,
-        min_similarity: float | None,
-    ) -> bool:
-        # Check is_merged first — fast reject
-        if rule.is_merged != cell.is_merged:
-            return False
-
         cell_value = cell.value or ""
-
         if isinstance(rule.pattern, str):
-            if normalize:
+            if rule.normalize:
                 cell_value = cell_value.strip().lower()
 
-            if min_similarity is not None:
-                return fuzz.ratio(rule.pattern, cell_value) / 100.0 >= min_similarity
+            if rule.min_similarity is not None:
+                return fuzz.ratio(rule.pattern, cell_value) / 100.0 >= rule.min_similarity
             return rule.pattern == cell_value
         return bool(rule.pattern.fullmatch(cell_value))
 
+    def _match_template(self, cid_grid: list[list[set[CompiledCellConditionId]]], compiled_template: CompiledTemplate) -> tuple[bool, str]:
+        compile_rule_id_sequence: list[CompiledRuleId] = []
+        for cid_row in cid_grid:
+            symbol = self._match_row(cid_row, compiled_template)
+            if symbol is not None:
+                compile_rule_id_sequence.append(symbol)
+        joined = "".join(rid.symbol for rid in compile_rule_id_sequence)
+
+        m = re.match(compiled_template.regex, joined)
+        if m:
+            return True, m.group(0)
+        return False, ""
+
+    def _match_row(self, cid_row: list[set[CompiledCellConditionId]], compiled_template: CompiledTemplate) -> CompiledRuleId | None:
+        for compile_rule_id, compiled_rule in compiled_template.rule_id_map.items():
+            if len(cid_row) != len(compiled_rule.rules):
+                continue
+
+            matched = sum(rule in cid_set for rule, cid_set in zip(compiled_rule.rules, cid_row))
+            if compiled_rule.match_ratio is not None:
+                if (matched / len(cid_row)) >= compiled_rule.match_ratio:
+                    return compile_rule_id
+            elif matched == len(cid_row):
+                return compile_rule_id
+        return None
+
+    def _build_match_result(
+        self,
+        grid: InternalGrid,
+        start_position: tuple[int, int],
+        match_str: str,
+        compiled_template: CompiledTemplate,
+    ) -> BlockMatch:
+        start_row, start_col = start_position
+
+        row_matches = []
+        for i, symbol_char in enumerate(match_str):
+            rule_id = CompiledRuleId(ord(symbol_char) - 0xF0000)
+            compiled_rule = compiled_template.rule_id_map[rule_id]
+
+            cell_matches = []
+            for j in range(len(compiled_rule.rules)):
+                cell = grid.get_cell(i, j)
+                cell_matches.append(CellMatch(
+                    row=start_row + i,
+                    col=start_col+j,
+                    value=cell.value,
+                    is_merged=cell.is_merged
+                ))
+            row_matches.append(RowMatch(
+                row=start_row + i,
+                cells=cell_matches,
+                node_id=compiled_rule.node_id,
+            ))
+
+        return BlockMatch(
+            start=(start_row, start_col),
+            end=(start_row + len(match_str) - 1, start_col + compiled_template.width - 1),
+            rows=row_matches,
+            block_id=compiled_template.block_id,
+        )
+    
     # ------------------------------------------------------------------
     # Compile Parts
     # ------------------------------------------------------------------
 
-    def _compile(self, block: Block) -> tuple[str, dict[str, CompiledRule]]:
-        self._seen: dict[CompiledRule, str] = {}
-        self._counter: int = 0
-        self._symbol_map: dict[str, CompiledRule] = {}
-
+    def _compile(self, block: Block) -> tuple[str, dict[CompiledRuleId, CompiledRule], dict[CompiledCellCondition, CompiledCellConditionId]]:
+        self._seen: dict[CompiledRule, CompiledRuleId] = {}
+        self._rule_id_map: dict[CompiledRuleId, CompiledRule] = {}
+        self._cond_id_map_rv: dict[CompiledCellCondition, CompiledCellConditionId] = {}
         parts = [self._visit(child) for child in block.children]
-        return "".join(parts), self._symbol_map
+        return "".join(parts), self._rule_id_map, self._cond_id_map_rv
+
+    def _compile_condition(
+            self,
+            condition: str | CellCondition,
+            normalize: bool,
+            min_similarity: float | None
+    ) -> CompiledCellCondition:
+        if isinstance(condition, str):
+            if normalize:
+                condition = condition.strip().lower()
+            return CompiledCellCondition(
+                pattern=condition,
+                is_merged=False,
+                normalize=normalize,
+                min_similarity=min_similarity,
+            )
+        return CompiledCellCondition(
+            pattern=re.compile('|'.join(list(condition.patterns))),
+            is_merged=condition.is_merged,
+            normalize=normalize,
+            min_similarity=min_similarity,
+        )
 
     def _register(self, node: TemplateNode) -> str:
-        def _process_pattern(r: str | CellCondition, normalize: bool) -> CompiledCellCondition:
-            if isinstance(r, str):
-                if normalize:
-                    r = r.strip().lower()
-                return CompiledCellCondition(pattern=r, is_merged=False)
-            return CompiledCellCondition(
-                pattern=re.compile('|'.join(list(r.patterns))),
-                is_merged=r.is_merged
-            )
+        rules = [
+            self._compile_condition(
+                condition=r,
+                normalize=node.normalize,
+                min_similarity=node.min_similarity,
+            ) for r in node.rules()
+        ]
+
+        # Record condition first
+        new_rules = set(rule for rule in rules if rule not in self._cond_id_map_rv)
+        cnt = len(self._cond_id_map_rv)
+        for i, r in enumerate(new_rules):
+            self._cond_id_map_rv[r] = CompiledCellConditionId(cnt+i)
 
         key = CompiledRule(
-            rules=tuple(
-                _process_pattern(r, node.normalize)
-                for r in node.rules()
-            ),
-            normalize=node.normalize,
-            min_similarity=node.min_similarity,
+            rules=tuple(self._cond_id_map_rv[r] for r in rules),
             match_ratio=node.match_ratio,
+            node_id=node.node_id
         )
+
         if key not in self._seen:
-            if self._counter > 0xFFFF:
+            num_rule = len(self._seen)
+            if num_rule > 0xFFFF:
                 raise RuntimeError("Too many unique rules (>65534), this is likely a bug")
-            symbol_char = chr(0xF0000 + self._counter)
-            self._counter += 1
-            self._seen[key] = symbol_char
-            self._symbol_map[symbol_char] = key
-        return self._seen[key]
+            self._seen[key] = CompiledRuleId(num_rule)
+            self._rule_id_map[CompiledRuleId(num_rule)] = key
+        return self._seen[key].symbol
 
     @staticmethod
     def _repeat_suffix(node: TemplateNode) -> str:
@@ -256,7 +313,7 @@ def match_template(
     template: Block | list[Block],
     sheet: str | int | list[str | int] | None = None,
     options: MatchOptions | None = None,
-) -> MatchOutput:
+) -> list[list[list[BlockMatch]]]:
     """Extract data from an Excel file using a template description.
 
     Parameters
@@ -314,8 +371,8 @@ def match_template(
         if not_found_sheet:
             raise ValueError(f"Sheet {', '.join(not_found_sheet)} not found.")
 
-    merged_results: list = []
-    merged_near_misses: list = []
+    match_results: list = []
+    matched_cnt = 0
 
     template_matcher = TemplateMatcher(templates, options)
 
@@ -329,20 +386,22 @@ def match_template(
 
         # Start matching
         output = template_matcher.scan_for_blocks(grid)
-        print(output)
-        exit(0)
+
         # Check progress
-        flag_complete = False
-        if options.return_mode == "FIRST" and output.results:
-            flag_complete = True
+        is_any_matched = True
+        if not output or all(not inner for inner in output):
+            is_any_matched = False
+        
+        if is_any_matched:
+            matched_cnt += 1
 
-        merged_results.extend(output.results)
-        merged_near_misses.extend(output.near_misses)
+        match_results.append(output)
 
-        if flag_complete:
+        if matched_cnt >= options.return_mode:
             break
 
     # Clean up
     if wb_openpyxl is not None:
         wb_openpyxl.close()
-    return MatchOutput(results=merged_results, near_misses=merged_near_misses)
+
+    return match_results
