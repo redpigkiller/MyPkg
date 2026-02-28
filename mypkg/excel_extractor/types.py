@@ -5,11 +5,9 @@ The Types class exposes user-facing constants that map onto CellConditions.
 """
 
 from __future__ import annotations
-import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
-
-@dataclass
+@dataclass(frozen=True)
 class CellCondition:
     """Internal representation of a cell match condition.
 
@@ -17,72 +15,28 @@ class CellCondition:
                   An empty pattern '' means "match nothing for non-None values"
                   (used as a sentinel alongside matches_none=True for EMPTY).
     is_merged   : if True, the cell must originate from a merge-expand.
-    any_val     : if True, match any non-empty value regardless of pattern.
-    matches_none: if True, a None cell value satisfies this condition.
     """
 
-    pattern: str
+    patterns: frozenset[str]
     is_merged: bool = False
-    any_val: bool = False
-    matches_none: bool = False
-    original_str: str | None = None
 
-    def matches(self, value: str | None, is_merged: bool, *, flags: int = 0) -> bool:
-        """Return True if a normalised InternalCell satisfies this condition."""
-        if self.is_merged and not is_merged:
-            return False
-        if self.any_val:
-            return value is not None and value != ""
-        if value is None:
-            return self.matches_none
-        # Empty pattern (with matches_none=False) matches nothing for non-None values.
-        if not self.pattern:
-            return False
-        flags |= re.DOTALL
-        return bool(re.fullmatch(self.pattern, str(value), flags))
-
+    @classmethod
+    def from_pattern(cls, pattern: str, *, is_merged: bool = False) -> "CellCondition":
+        if not pattern:
+            return cls(frozenset(), is_merged)
+        return cls(frozenset([pattern]), is_merged)
+    
     def __or__(self, other: "CellCondition") -> "CellCondition":
-        if isinstance(self, UnionCellCondition):
-            return UnionCellCondition(self.conditions + [other])
-        return UnionCellCondition([self, other])
-
+        return CellCondition(
+            patterns=self.patterns | other.patterns,
+            is_merged=self.is_merged or other.is_merged,
+        )
+    
     def __call__(self, n: int) -> list["CellCondition"]:
-        """Syntactic sugar for repeating a condition n times in a row pattern.
-        
-        Example
-        -------
-        ::
-        
-            Row(["ID", Types.ANY(3), "Status"])
-            # Equivalent to:
-            # Row(["ID", Types.ANY, Types.ANY, Types.ANY, "Status"])
-        """
+        """Syntactic sugar for repeating a condition n times in a row pattern."""
         if not isinstance(n, int) or n < 0:
             raise ValueError(f"Repeat count must be a non-negative integer, got {n!r}")
         return [self] * n
-
-
-@dataclass
-class UnionCellCondition(CellCondition):
-    """Combines multiple CellConditions with OR logic."""
-    conditions: list[CellCondition] = field(default_factory=list)
-
-    def __init__(self, conditions: list[CellCondition]):
-        super().__init__(pattern="", matches_none=False, any_val=False, is_merged=False)
-        self.conditions = conditions
-
-    def matches(self, value: str | None, is_merged: bool, *, flags: int = 0) -> bool:
-        return any(c.matches(value, is_merged, flags=flags) for c in self.conditions)
-
-    def __or__(self, other: "CellCondition") -> "CellCondition":
-        if isinstance(other, UnionCellCondition):
-            return UnionCellCondition(self.conditions + other.conditions)
-        return UnionCellCondition(self.conditions + [other])
-
-
-def _literal(s: str) -> CellCondition:
-    """Turn a plain Python string into a literal-match CellCondition."""
-    return CellCondition(pattern=re.escape(s), original_str=s)
 
 
 class Types:
@@ -104,20 +58,31 @@ class Types:
     """
 
     # --- basic value types ---
-    ANY   = CellCondition(pattern="", any_val=True)
-    STR   = CellCondition(pattern=r".+")
-    INT   = CellCondition(pattern=r"-?\d+")
-    FLOAT = CellCondition(pattern=r"-?\d+(\.\d+)?")
-    DATE  = CellCondition(pattern=r"\d{4}-\d{2}-\d{2}")
-    TIME  = CellCondition(pattern=r"\d{2}:\d{2}")
+    ANY = CellCondition.from_pattern(pattern=r".*")
+    STR = CellCondition.from_pattern(pattern=r".+")
+    INT = CellCondition.from_pattern(pattern=r"[\+-]?\d+")
+    POS_INT = CellCondition.from_pattern(pattern=r"\+?\d+")
+    NEG_INT = CellCondition.from_pattern(pattern=r"-\d+")
+    FLOAT = CellCondition.from_pattern(pattern=r"[\+-]?\d+(\.\d+)?")
+    SCIENTIFIC = CellCondition.from_pattern(pattern=r"[\+-]?\d+(\.\d+)?([eE][\+-]?\d+)?")
+    PERCENT = CellCondition.from_pattern(pattern=r"[\+-]?\d+(\.\d+)?%")
+
+    HEX = CellCondition.from_pattern(pattern=r"0[xX][0-9a-fA-F]+")
+    BIN = CellCondition.from_pattern(pattern=r"0[bB][01]+")
+    OCT = CellCondition.from_pattern(pattern=r"0[oO][0-7]+")
+
+    DATE_ISO = CellCondition.from_pattern(pattern=r"\d{4}-\d{2}-\d{2}")
+    DATE_SLASH = CellCondition.from_pattern(pattern=r"\d{2}/\d{2}/\d{4}")
+
+    TIME_24H = CellCondition.from_pattern(pattern=r"\d{2}:\d{2}")
 
     # --- structural types ---
-    MERGED = CellCondition(pattern=r".*", is_merged=True)
-    SPACE  = CellCondition(pattern=r"^\s*$")
-    EMPTY  = CellCondition(pattern="", matches_none=True)   # matches None only
-    BLANK  = CellCondition(pattern=r"^\s*$", matches_none=True)  # EMPTY | SPACE
+    MERGED = CellCondition.from_pattern(pattern=r".*", is_merged=True)
+    SPACE = CellCondition.from_pattern(pattern=r"^\s*$")
+    EMPTY = CellCondition.from_pattern(pattern="")
+    BLANK = CellCondition.from_pattern(pattern=r"^\s*$")
 
     @staticmethod
-    def r(pattern: str) -> CellCondition:
+    def r(pattern: str, is_merged: bool = False) -> CellCondition:
         """Create a CellCondition from a custom regex pattern."""
-        return CellCondition(pattern=pattern)
+        return CellCondition.from_pattern(pattern=pattern, is_merged=is_merged)

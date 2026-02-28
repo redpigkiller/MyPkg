@@ -10,11 +10,11 @@ class TestTypesAnyN(unittest.TestCase):
         self.assertEqual(len(row.pattern), 5)
         
         # Verify the pattern contents
-        self.assertEqual(row.pattern[0].pattern, "Name")
+        self.assertEqual(row.pattern[0].patterns, "Name")
         self.assertTrue(row.pattern[1].any_val)
         self.assertTrue(row.pattern[2].any_val)
         self.assertTrue(row.pattern[3].any_val)
-        self.assertEqual(row.pattern[4].pattern, "Salary")
+        self.assertEqual(row.pattern[4].patterns, "Salary")
 
     def test_types_any_n_invalid(self):
         with self.assertRaises(ValueError):

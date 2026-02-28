@@ -14,10 +14,12 @@ repeat = (N, None)  → N or more
 """
 
 from __future__ import annotations
+import warnings
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from mypkg.excel_extractor.types import CellCondition, Types, _literal
+from mypkg.excel_extractor.types import CellCondition, Types
 
 RepeatSpec = int | str | tuple[int, int | None]
 
@@ -48,7 +50,7 @@ def _parse_repeat(repeat: RepeatSpec) -> tuple[int, int | None]:
     raise TypeError(f"Unsupported repeat spec: {repeat!r}")
 
 
-def _normalise_pattern(pattern: list[Any]) -> list[CellCondition]:
+def _parse_pattern(pattern: list[Any]) -> list[CellCondition|str]:
     """Convert each element of a pattern list to a CellCondition.
 
     str  → literal match
@@ -56,175 +58,123 @@ def _normalise_pattern(pattern: list[Any]) -> list[CellCondition]:
     """
     result = []
     for item in pattern:
-        if isinstance(item, CellCondition):
+        if isinstance(item, list):
+            result.extend(_parse_pattern(item))
+        elif isinstance(item, (CellCondition, str)):
             result.append(item)
-        elif isinstance(item, str):
-            result.append(_literal(item))
-        elif isinstance(item, list):
-            # This allows syntax like `Row(["Name", Types.ANY(3), "Salary"])`
-            # since `Types.ANY(3)` returns a list of 3 `Types.ANY` conditions.
-            for sub_item in item:
-                if isinstance(sub_item, CellCondition):
-                    result.append(sub_item)
-                elif isinstance(sub_item, str):
-                    result.append(_literal(sub_item))
-                else:
-                    raise TypeError(f"Nested pattern elements must be str or CellCondition, got {type(sub_item)}")
         else:
-            raise TypeError(f"Pattern elements must be str, CellCondition, or a list, got {type(item)}")
+            raise TypeError(
+                f"Invalid pattern element: {item!r}"
+            )
     return result
 
 
-class TemplateNode:
+@dataclass
+class TemplateNode(ABC):
     """Abstract base for all template AST nodes."""
+    repeat: RepeatSpec = 1
+    node_id: str | None = None
+    normalize: bool = True
+    min_similarity: float | None = None
+    match_ratio: float | None = None
+    repeat_range: tuple[int, int | None] = field(init=False)
+
+    def __post_init__(self):
+        self.repeat_range = _parse_repeat(self.repeat)
+        if self.min_similarity is not None:
+            if not (0.0 <= self.min_similarity <= 1.0):
+                raise ValueError("min_similarity must be in [0.0, 1.0]")
+        if self.match_ratio is not None:
+            if not (0.0 <= self.match_ratio <= 1.0):
+                raise ValueError("match_ratio must be in [0.0, 1.0]")
+
+    def __or__(self, other: TemplateNode) -> AltNode:
+        """Support Row(...) | Row(...) syntax."""
+        for node in (self, other):
+            if node.repeat_range != (1, 1):
+                warnings.warn(
+                    f"repeat={node.repeat!r} on {type(node).__name__} inside | will be ignored. "
+                    "Set repeat on the AltNode itself after construction, or use Alt(..., repeat=...).",
+                    UserWarning,
+                    stacklevel=2,
+                )
+        left = self.alternatives if isinstance(self, AltNode) else [self]
+        right = other.alternatives if isinstance(other, AltNode) else [other]
+        return AltNode(alternatives=left + right)
+    
+    @abstractmethod
+    def rules(self) -> list[CellCondition | str]:
+        ...
 
 
+@dataclass
+class AltNode(TemplateNode):
+    """Matches any one of the given alternatives (OR semantics).
+    
+    Created via the | operator on TemplateNode subclasses.
+    e.g. Row(HEADER) | Row(SUBHEADER)
+    """
+    alternatives: list[TemplateNode] = field(default_factory=list)
+
+    def rules(self) -> list[CellCondition | str]:
+        # Return all alternatives' rules flattened
+        # matcher must treat each as a separate candidate
+        return [rule for alt in self.alternatives for rule in alt.rules()]
+    
 @dataclass
 class Row(TemplateNode):
-    """Horizontal pattern: matches one or more Excel rows.
-
-    Parameters
-    ----------
-    pattern : list of str (literal) or CellCondition
-    repeat  : how many times this row pattern must appear
-    node_id : optional label surfaced in NodeResult
-    """
-    pattern: list[CellCondition] = field(default_factory=list)
-    repeat: RepeatSpec = 1
-    node_id: str | None = None
-    normalize: bool = True
-    fuzzy: float | None = None
+    """Horizontal pattern: matches one or more Excel rows."""
+    pattern: list[Any] = field(default_factory=list)
 
     def __post_init__(self):
-        self.pattern = _normalise_pattern(self.pattern)
-        self._repeat_range = _parse_repeat(self.repeat)
+        super().__post_init__()
+        self._rules = _parse_pattern(self.pattern)
 
-    @property
-    def repeat_min(self) -> int:
-        return self._repeat_range[0]
-
-    @property
-    def repeat_max(self) -> int | None:
-        return self._repeat_range[1]
-
-
-@dataclass
-class Col(TemplateNode):
-    """Vertical pattern: matches one or more Excel columns.
-
-    Parameters
-    ----------
-    pattern : list of str (literal) or CellCondition  (top-to-bottom)
-    repeat  : how many times this column pattern must appear
-    node_id : optional label surfaced in NodeResult
-    """
-    pattern: list[CellCondition] = field(default_factory=list)
-    repeat: RepeatSpec = 1
-    node_id: str | None = None
-    normalize: bool = True
-    fuzzy: float | None = None
-
-    def __post_init__(self):
-        self.pattern = _normalise_pattern(self.pattern)
-        self._repeat_range = _parse_repeat(self.repeat)
-
-    @property
-    def repeat_min(self) -> int:
-        return self._repeat_range[0]
-
-    @property
-    def repeat_max(self) -> int | None:
-        return self._repeat_range[1]
-
+    def rules(self) -> list[CellCondition | str]:
+        return self._rules
 
 @dataclass
 class EmptyRow(TemplateNode):
-    """Matches one or more completely empty rows (syntactic sugar).
-
-    Parameters
-    ----------
-    repeat          : repeat spec
-    allow_whitespace: if True, cells that are empty strings also count as empty
-    """
-    repeat: RepeatSpec = 1
-    allow_whitespace: bool = False
-    node_id: str | None = None
+    """Matches one or more completely empty rows (syntactic sugar)."""
+    allow_whitespace: bool = True
 
     def __post_init__(self):
-        self._repeat_range = _parse_repeat(self.repeat)
-        cond = Types.EMPTY | Types.SPACE if self.allow_whitespace else Types.EMPTY
-        # EmptyRow is stored as a Row with a single wildcard-width pattern
-        self._condition = cond
+        super().__post_init__()
+        self._rules: list[CellCondition | str] = [Types.EMPTY | Types.SPACE if self.allow_whitespace else Types.EMPTY]
 
-    @property
-    def repeat_min(self) -> int:
-        return self._repeat_range[0]
-
-    @property
-    def repeat_max(self) -> int | None:
-        return self._repeat_range[1]
-
-
-@dataclass
-class EmptyCol(TemplateNode):
-    """Matches one or more completely empty columns (syntactic sugar)."""
-    repeat: RepeatSpec = 1
-    allow_whitespace: bool = False
-    node_id: str | None = None
-
-    def __post_init__(self):
-        self._repeat_range = _parse_repeat(self.repeat)
-        self._condition = Types.EMPTY | Types.SPACE if self.allow_whitespace else Types.EMPTY
-
-    @property
-    def repeat_min(self) -> int:
-        return self._repeat_range[0]
-
-    @property
-    def repeat_max(self) -> int | None:
-        return self._repeat_range[1]
-
-
+    def rules(self) -> list[CellCondition | str]:
+        return self._rules
+    
+    def expand_width(self, width: int):
+        if len(self._rules) > 1:
+            raise ValueError(f"The EmptyRow has already been expanded (length = {len(self._rules)}).")
+        self._rules *= width
+    
 @dataclass
 class Group(TemplateNode):
-    """Groups multiple Row/Col/EmptyRow/EmptyCol nodes for collective repetition.
-
-    Parameters
-    ----------
-    children : sequence of TemplateNode (no nested Group for now)
-    repeat   : how many times the whole group repeats
-    """
+    """Groups multiple Row/Col/EmptyRow/EmptyCol nodes for collective repetition."""
     children: list[TemplateNode] = field(default_factory=list)
-    repeat: RepeatSpec = 1
 
-    def __init__(self, *children: TemplateNode, repeat: RepeatSpec = 1):
-        self.children = list(children)
-        self.repeat = repeat
-        self._repeat_range = _parse_repeat(repeat)
-
-    @property
-    def repeat_min(self) -> int:
-        return self._repeat_range[0]
-
-    @property
-    def repeat_max(self) -> int | None:
-        return self._repeat_range[1]
-
+    def __post_init__(self):
+        super().__post_init__()
+        self.children = list(self.children)
+    
+    def rules(self) -> list[CellCondition | str]:
+        result = []
+        for child in self.children:
+            result.extend(child.rules())
+        return result
 
 @dataclass
-class Block(TemplateNode):
+class Block:
     """Top-level template unit.
-
-    A Block consists entirely of Row-family nodes (orientation='vertical')
-    or entirely of Col-family nodes (orientation='horizontal').  Mixing is
-    not allowed.
-
-    Parameters
-    ----------
-    children    : Row, Col, EmptyRow, EmptyCol, or Group nodes
-    block_id    : optional name for identification in MatchResult
-    orientation : 'vertical'  → children are Row/EmptyRow/Group
-                  'horizontal' → children are Col/EmptyCol/Group
+    
+    Usage:
+        Block(
+            Row(HEADER, node_id="header", min_similarity=0.85),
+            Row(FIELD, node_id="field", repeat="*"),
+            block_id="my_table",
+        )
     """
     children: list[TemplateNode] = field(default_factory=list)
     block_id: str | None = None
@@ -240,27 +190,53 @@ class Block(TemplateNode):
         self.block_id = block_id
         self.orientation = orientation
         self._validate()
+        self.width = self._infer_width(self.children)
+        self._expand(self.children)
 
     def _validate(self):
-        row_types = (Row, EmptyRow)
-        col_types = (Col, EmptyCol)
         for child in self.children:
-            if isinstance(child, Group):
-                continue  # Group is direction-neutral at declaration time
-            if self.orientation == "vertical" and isinstance(child, col_types):
-                raise TypeError(
-                    f"Block(orientation='vertical') cannot contain Col/EmptyCol nodes, "
-                    f"got {type(child).__name__}"
+            if not isinstance(child, TemplateNode):
+                raise TypeError(f"Block children must be TemplateNode, got {type(child)}")
+    
+    def _infer_width(self, nodes: list[TemplateNode], expected: int | None = None) -> int:
+        """Infer block width from Row nodes, validate consistency."""
+        for node in nodes:
+            if isinstance(node, AltNode):
+                widths = [self._infer_width([alt]) for alt in node.alternatives]
+                if len(set(widths)) > 1:
+                    raise ValueError(
+                        f"AltNode alternatives have inconsistent widths: {widths}"
+                    )
+                w = widths[0]
+            elif isinstance(node, Group):
+                w = self._infer_width(node.children, expected)
+            elif isinstance(node, EmptyRow):
+                continue  # skip, will be expanded later
+            else:
+                w = len(node.rules())   # Row
+
+            if expected is not None and w != expected:
+                raise ValueError(
+                    f"{type(node).__name__} has width {w}, expected {expected}"
                 )
-            if self.orientation == "horizontal" and isinstance(child, row_types):
-                raise TypeError(
-                    f"Block(orientation='horizontal') cannot contain Row/EmptyRow nodes, "
-                    f"got {type(child).__name__}"
-                )
+            expected = w
+
+        if expected is None:
+            raise ValueError("Block has no Row to infer width from")
+        return expected
+
+    def _expand(self, nodes: list[TemplateNode]) -> None:
+        """Expand EmptyRow rules to match block width."""
+        for node in nodes:
+            if isinstance(node, AltNode):
+                for alt in node.alternatives:
+                    self._expand([alt])
+            elif isinstance(node, Group):
+                self._expand(node.children)
+            elif isinstance(node, EmptyRow):
+                node.expand_width(self.width)
 
     def __repr__(self) -> str:
         id_part = f"{self.block_id!r}, " if self.block_id else ""
-        return f"Block({id_part}{self.orientation}, {len(self.children)} children)"
-
-
-
+        return f"Block({id_part}{self.orientation!r}, {len(self.children)} children)"
+    

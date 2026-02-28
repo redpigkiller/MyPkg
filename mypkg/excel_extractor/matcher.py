@@ -1,6 +1,6 @@
 """Template Matcher — PEG greedy matching engine.
-
 Strategy
+
 --------
 Every `repeat` node is matched greedily: consume as many instances as
 possible (up to repeat_max), then stop.  There is no backtracking.
@@ -34,716 +34,239 @@ by larger blocks.
 """
 
 from __future__ import annotations
-import re as _re
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+from dataclasses import dataclass
+import re
 
+import xlrd
+import openpyxl
+from rapidfuzz import fuzz
 from mypkg.excel_extractor.types import CellCondition, Types
 from mypkg.excel_extractor.template import (
-    Block, Col, EmptyCol, EmptyRow, Group, Row, TemplateNode,
+    Block,
+    EmptyRow,
+    Group,
+    Row,
+    TemplateNode,
+    AltNode,
 )
 from mypkg.excel_extractor.result import (
-    MatchOptions, MatchOutput, MatchResult, NearMissHint, NodeResult,
+    MatchOptions,
+    MatchOutput,
+    MatchResult,
+    NearMissHint,
+    NodeResult,
 )
-from mypkg.excel_extractor.normalizer import InternalCell, InternalGrid, load_and_normalize_excel
-
-
-# ---------------------------------------------------------------------------
-# excel_range helper
-# ---------------------------------------------------------------------------
-
-def _col_letter_to_index(letters: str) -> int:
-    """Convert a column letter (A, B, …, AA, …) to a 0-based column index."""
-    result = 0
-    for ch in letters.upper():
-        result = result * 26 + (ord(ch) - ord("A") + 1)
-    return result - 1
-
-
-def excel_range(ref: str) -> tuple[int, int, int, int]:
-    """Convert an Excel-style range reference to a 0-based tuple.
-
-    Parameters
-    ----------
-    ref : a string like ``"A1:D20"`` or ``"B3:F10"``
-
-    Returns
-    -------
-    ``(row1, col1, row2, col2)`` — 0-based, inclusive on both ends.
-
-    Examples
-    --------
-    ::
-
-        excel_range("A1:D20")   # → (0, 0, 19, 3)
-        excel_range("B3:F10")   # → (2, 1, 9, 5)
-    """
-    m = _re.fullmatch(r"([A-Za-z]+)(\d+):([A-Za-z]+)(\d+)", ref.strip())
-    if not m:
-        raise ValueError(
-            f"Invalid Excel range {ref!r}. Expected format like 'A1:D20'."
-        )
-    col1 = _col_letter_to_index(m.group(1))
-    row1 = int(m.group(2)) - 1
-    col2 = _col_letter_to_index(m.group(3))
-    row2 = int(m.group(4)) - 1
-    return (row1, col1, row2, col2)
-
-
-# ---------------------------------------------------------------------------
-# Cell-level matching
-# ---------------------------------------------------------------------------
-
-def _cell_matches(
-    cell: InternalCell,
-    condition: CellCondition,
-    normalize: bool = False,
-    fuzzy: float | None = None,
-    warn_fuzzy: bool = False,
-) -> bool:
-    val = cell.value
-    if val is not None and isinstance(val, str) and normalize:
-        val = val.strip().lower()
-
-    # If it's not a fuzzy match, just use the built-in matcher
-    if not fuzzy or not condition.pattern or condition.any_val or condition.matches_none or condition.is_merged:
-        import re as _re
-        flags = _re.IGNORECASE if normalize else 0
-        return condition.matches(val, cell.is_merged, flags=flags)
-    
-    # Fuzzy matching requires rapidfuzz
-    try:
-        from rapidfuzz import fuzz
-    except ImportError:
-        import warnings
-        warnings.warn("rapidfuzz is required for fuzzy matching. Falling back to exact match.")
-        return condition.matches(val, cell.is_merged)
-        
-    if val is None:
-        return condition.matches_none
-        
-    # We only apply fuzzy logic if it's a literal string match that has original_str
-    if condition.original_str is None:
-        return False
-        
-    pattern_str = condition.original_str
-    if normalize:
-        pattern_str = pattern_str.strip().lower()
-        
-    ratio = fuzz.ratio(pattern_str, val) / 100.0
-    
-    if ratio >= fuzzy:
-        if warn_fuzzy and ratio < 1.0:
-            import warnings
-            warnings.warn(f"Fuzzy matched '{pattern_str}' with '{val}' (ratio: {ratio:.2f})")
-        return True
-        
-    return False
-
-
-def _condition_desc(cond: CellCondition) -> str:
-    """Return a human-readable description of a CellCondition for diagnostics."""
-    if cond.any_val:
-        return "ANY"
-    if cond.matches_none and not cond.pattern:
-        return "EMPTY"
-    if cond.matches_none and cond.pattern:
-        return "BLANK"
-    if cond.is_merged:
-        return "MERGED"
-    return f"pattern={cond.pattern!r}"
-
-
-# ---------------------------------------------------------------------------
-# Area estimator for consumption-mask sort
-# ---------------------------------------------------------------------------
-
-def _estimate_area(block: Block) -> int:
-    """Return a rough area estimate (rows × cols) for sort-ordering purposes.
-
-    Counts only the minimum required repetitions so that optional nodes
-    do not artificially inflate the estimate.
-    """
-    if block.orientation == "vertical":
-        rows = sum(
-            c.repeat_min if hasattr(c, "repeat_min") else 1
-            for c in block.children
-        )
-        cols = 0
-        for c in block.children:
-            if isinstance(c, Row):
-                cols = max(cols, len(c.pattern))
-            elif isinstance(c, Group):
-                for gc in c.children:
-                    if isinstance(gc, Row):
-                        cols = max(cols, len(gc.pattern))
-        return rows * max(cols, 1)
-    else:
-        cols = sum(
-            c.repeat_min if hasattr(c, "repeat_min") else 1
-            for c in block.children
-        )
-        rows = 0
-        for c in block.children:
-            if isinstance(c, Col):
-                rows = max(rows, len(c.pattern))
-            elif isinstance(c, Group):
-                for gc in c.children:
-                    if isinstance(gc, Col):
-                        rows = max(rows, len(gc.pattern))
-        return max(rows, 1) * cols
+from mypkg.excel_extractor.normalizer import InternalCell, InternalGrid
+from mypkg.excel_extractor.normalizer import _load_xls_from_wb, _load_xlsx_from_wb
 
 
 # ---------------------------------------------------------------------------
 # TemplateMatcher
 # ---------------------------------------------------------------------------
 
+@dataclass(frozen=True)
+class CompiledCellCondition:
+    pattern: str | re.Pattern
+    is_merged: bool = False
+
+
+@dataclass(frozen=True)
+class CompiledRule:
+    rules: tuple[CompiledCellCondition, ...]
+    normalize: bool
+    min_similarity: float | None
+    match_ratio: float | None
+
+@dataclass
+class CompiledTemplate:
+    regex: re.Pattern
+    symbol_map: dict[str, CompiledRule]
+    width: int
+
 class TemplateMatcher:
     """Matches one or more Block templates against an InternalGrid."""
 
-    def __init__(self, grid: InternalGrid, sheet_name: str, options: MatchOptions):
-        self.grid = grid
-        self.sheet_name = sheet_name
+    def __init__(self, templates: list[Block], options: MatchOptions):
+        self.templates = templates
         self.options = options
 
-    # ------------------------------------------------------------------ #
-    # Row / Col node matching (single-line)                               #
-    # ------------------------------------------------------------------ #
+        self.compiled_templates = []
+        for template in self.templates:
+            regex, symbol_map = self._compile(template)
+            self.compiled_templates.append(
+                CompiledTemplate(
+                    regex=re.compile(regex),
+                    symbol_map=symbol_map,
+                    width=template.width
+                )
+            )
+            
+    # ------------------------------------------------------------------
+    # Match Parts
+    # ------------------------------------------------------------------
 
-    def _try_match_row(
-        self,
-        grid_row: int,
-        start_col: int,
-        row_node: Row,
-    ) -> tuple[list[Any] | None, str]:
-        """Try to match a Row node against grid row *grid_row*.
+    def scan_for_blocks(self, grid: InternalGrid) -> list[tuple[int, int]]:
+        match_result = []
+        for compiled_template in self.compiled_templates:
+            template_regex = compiled_template.regex
+            symbol_map = compiled_template.symbol_map
+            width = compiled_template.width
 
-        Returns a tuple: (extracted_cells, reason_if_failed).
-        """
-        pat = row_node.pattern
-        if not pat:
-            return [], ""
-        cells = self.grid.get_row_slice(grid_row, start_col, len(pat))
-        if len(cells) < len(pat):
-            return None, f"Not enough columns (expected {len(pat)}, got {len(cells)})"
-        extracted = []
-        for i, (cell, cond) in enumerate(zip(cells, pat)):
-            if not _cell_matches(
-                cell,
-                cond,
-                normalize=row_node.normalize,
-                fuzzy=row_node.fuzzy,
-                warn_fuzzy=self.options.warn_fuzzy,
-            ):
-                return None, f"Column {i} (expected {_condition_desc(cond)}) did not match '{cell.value}'"
-            extracted.append(cell.original_value)
-        return extracted, ""
+            match_positions = []
+            for i in range(grid.num_rows):
+                for j in range(grid.num_cols - width + 1):
+                    sub_grid = grid[i:, j:j + width]
+                    if self._match_template(sub_grid, template_regex, symbol_map):
+                        match_positions.append((i, j))
+            match_result.append(match_positions)
+        return match_result
 
-    def _try_match_empty_row(
-        self,
-        grid_row: int,
-        start_col: int,
-        width: int,
-        allow_whitespace: bool,
-    ) -> tuple[bool, str]:
-        """Check if grid row *grid_row* is considered empty."""
-        for c in range(start_col, start_col + width):
-            cell = self.grid.get_cell(grid_row, c)
-            if cell is None:
-                continue
-            cond = Types.EMPTY | Types.SPACE if allow_whitespace else Types.EMPTY
-            if not _cell_matches(cell, cond):
-                return False, f"Column {c - start_col} is not empty (got '{cell.value}')"
-        return True, ""
+    def _match_template(self, sub_grid: list[list[InternalCell]], template_regex: str, symbol_map: dict[str, CompiledRule]) -> bool:
+        # Step 1: scan each row → symbol or None
+        symbol_sequence = []
+        for row in sub_grid:
+            symbol = self._match_row(row, symbol_map)
+            if symbol is not None:
+                symbol_sequence.append(symbol)
+        
+        # Step 2: join and regex match
+        joined = "".join(symbol_sequence)
+        return bool(re.match(template_regex, joined))
 
-    def _try_match_col(
-        self,
-        start_row: int,
-        grid_col: int,
-        col_node: Col,
-    ) -> tuple[list[Any] | None, str]:
-        """Try to match a Col node against grid column *grid_col*.
-
-        Returns a tuple: (extracted_cells, reason_if_failed).
-        """
-        pat = col_node.pattern
-        if not pat:
-            return [], ""
-        cells = self.grid.get_col_slice(start_row, grid_col, len(pat))
-        if len(cells) < len(pat):
-            return None, f"Not enough rows (expected {len(pat)}, got {len(cells)})"
-        extracted = []
-        for i, (cell, cond) in enumerate(zip(cells, pat)):
-            if not _cell_matches(cell, cond, normalize=col_node.normalize, fuzzy=col_node.fuzzy, warn_fuzzy=self.options.warn_fuzzy):
-                return None, f"Row {i} (expected {_condition_desc(cond)}) did not match '{cell.value}'"
-            extracted.append(cell.original_value)
-        return extracted, ""
-
-    def _try_match_empty_col(
-        self,
-        start_row: int,
-        grid_col: int,
-        height: int,
-        allow_whitespace: bool,
-    ) -> bool:
-        """Check if grid column *grid_col* (for *height* rows) is empty."""
-        for r in range(start_row, start_row + height):
-            cell = self.grid.get_cell(r, grid_col)
-            if cell is None:
-                continue
-            cond = Types.EMPTY | Types.SPACE if allow_whitespace else Types.EMPTY
-            if not _cell_matches(cell, cond):
-                return False
-        return True
-
-    # ------------------------------------------------------------------ #
-    # Block matching (vertical)                                           #
-    # ------------------------------------------------------------------ #
-
-    def _try_match_block_vertical(
-        self,
-        start_row: int,
-        start_col: int,
-        block: Block,
-    ) -> MatchResult | None:
-        """Attempt to match a vertical Block anchored at (start_row, start_col).
-
-        Returns a MatchResult on success, None on failure.
-        """
-        cursor = start_row
-        matched_nodes: list[NodeResult] = []
-        diagnostics: list[str] = []
-        col_width = self._infer_col_width(block, start_col)
-
-        for child in block.children:
-            result = self._consume_vertical(child, cursor, start_col, col_width, matched_nodes, diagnostics)
-            if result is None:
-                return None
-            cursor = result
-
-        return MatchResult(
-            block_id=block.block_id,
-            sheet=self.sheet_name,
-            anchor=(start_row, start_col),
-            orientation="vertical",
-            matched_nodes=matched_nodes,
-            diagnostics=diagnostics,
-        )
-
-    def _infer_col_width(self, block: Block, start_col: int) -> int:
-        """Infer column width by inspecting the first Row pattern length."""
-        for child in block.children:
-            if isinstance(child, Row):
-                return len(child.pattern)
-            if isinstance(child, Group):
-                for gc in child.children:
-                    if isinstance(gc, Row):
-                        return len(gc.pattern)
-        return max(1, self.grid.num_cols - start_col)
-
-    def _consume_vertical(
-        self,
-        node: TemplateNode,
-        cursor: int,
-        start_col: int,
-        col_width: int,
-        matched_nodes: list[NodeResult],
-        diagnostics: list[str],
-    ) -> int | None:
-        """Greedily consume one template node vertically.
-
-        Returns the new cursor position, or None on failure.
-        """
-        if isinstance(node, Row):
-            count = 0
-            rep_min, rep_max = node.repeat_min, node.repeat_max
-            while rep_max is None or count < rep_max:
-                extracted, reason = self._try_match_row(cursor, start_col, node)
-                if extracted is None:
-                    if count >= rep_min and count > 0 and rep_min != rep_max:
-                        diagnostics.append(f"Row(id={node.node_id!r}) stopped at grid row {cursor}: {reason}")
-                    break
-                matched_nodes.append(NodeResult(
-                    "Row", node.node_id, count, extracted,
-                    grid_row=cursor, grid_col=start_col,
-                ))
-                count += 1
-                cursor += 1
-            if count < rep_min:
-                return None
-            return cursor
-
-        elif isinstance(node, EmptyRow):
-            count = 0
-            rep_min, rep_max = node.repeat_min, node.repeat_max
-            while rep_max is None or count < rep_max:
-                if cursor >= self.grid.num_rows:
-                    if count >= rep_min and count > 0 and rep_min != rep_max:
-                        diagnostics.append(f"EmptyRow(id={node.node_id!r}) stopped at grid row {cursor}: limit reached")
-                    break
-                is_empty, reason = self._try_match_empty_row(cursor, start_col, col_width, node.allow_whitespace)
-                if not is_empty:
-                    if count >= rep_min and count > 0 and rep_min != rep_max:
-                        diagnostics.append(f"EmptyRow(id={node.node_id!r}) stopped at grid row {cursor}: {reason}")
-                    break
-                matched_nodes.append(NodeResult(
-                    "EmptyRow", node.node_id, count, [],
-                    grid_row=cursor, grid_col=start_col,
-                ))
-                count += 1
-                cursor += 1
-            if count < rep_min:
-                return None
-            return cursor
-
-        elif isinstance(node, Group):
-            group_count = 0
-            rep_min, rep_max = node.repeat_min, node.repeat_max
-            while rep_max is None or group_count < rep_max:
-                saved_cursor = cursor
-                saved_len = len(matched_nodes)
-                saved_diag_len = len(diagnostics)
-                failed = False
-                for child in node.children:
-                    result = self._consume_vertical(child, cursor, start_col, col_width, matched_nodes, diagnostics)
-                    if result is None:
-                        failed = True
-                        break
-                    cursor = result
-                if failed:
-                    cursor = saved_cursor
-                    del matched_nodes[saved_len:]
-                    del diagnostics[saved_diag_len:]
-                    if group_count >= rep_min and group_count > 0 and rep_min != rep_max:
-                        diagnostics.append(f"Group stopped at grid row {cursor}: inner block failed")
-                    break
-                group_count += 1
-            if group_count < rep_min:
-                return None
-            return cursor
-
-        return None  # unknown node type
-
-    def _partial_score_vertical(
-        self, start_row: int, start_col: int, block: Block
-    ) -> tuple[float, str, str | None, str | None]:
-        """Count the fraction of top-level children matched before first failure.
-
-        Used for near-miss hint generation only; does not modify state.
-        Returns (matched_ratio, description_of_failure, expected, got).
-        """
-        col_width = self._infer_col_width(block, start_col)
-        cursor = start_row
-        total = len(block.children)
-        if total == 0:
-            return 1.0, "", None, None
-
-        for i, child in enumerate(block.children):
-            dummy: list[NodeResult] = []
-            dummy_diag: list[str] = []
-            result = self._consume_vertical(child, cursor, start_col, col_width, dummy, dummy_diag)
-            if result is None:
-                child_desc = type(child).__name__
-                if hasattr(child, "node_id") and child.node_id:
-                    child_desc += f"(id={child.node_id!r})"
-                failed_at = f"{child_desc} at grid row {cursor}"
-                expected_str, got_str = self._row_failure_info_vertical(child, cursor, start_col)
-                return i / total, failed_at, expected_str, got_str
-            cursor = result
-
-        return 1.0, "", None, None
-
-    def _row_failure_info_vertical(
-        self, node: TemplateNode, grid_row: int, start_col: int
-    ) -> tuple[str | None, str | None]:
-        """Return (expected_desc, got_value) for the first mismatching cell in a Row node.
-
-        Scans through successful repetitions first so that repeated nodes
-        (e.g. repeat=3) correctly report the row where the match broke down,
-        not the starting row.
-        """
-        if not isinstance(node, Row) or not node.pattern:
-            return None, None
-        # Advance past rows that actually match, stop at the first failure
-        current = grid_row
-        upper = node.repeat_max if node.repeat_max is not None else self.grid.num_rows
-        for _ in range(upper):
-            if current >= self.grid.num_rows:
-                break
-            cells = self.grid.get_row_slice(current, start_col, len(node.pattern))
-            for cell, cond in zip(cells, node.pattern):
-                if not _cell_matches(cell, cond):
-                    return _condition_desc(cond), repr(cell.value)
-            current += 1
-        return None, None
-
-    # ------------------------------------------------------------------ #
-    # Block matching (horizontal)                                         #
-    # ------------------------------------------------------------------ #
-
-    def _try_match_block_horizontal(
-        self,
-        start_row: int,
-        start_col: int,
-        block: Block,
-    ) -> MatchResult | None:
-        """Attempt to match a horizontal Block anchored at (start_row, start_col)."""
-        cursor = start_col
-        matched_nodes: list[NodeResult] = []
-        diagnostics: list[str] = []
-        row_height = self._infer_row_height(block, start_row)
-
-        for child in block.children:
-            result = self._consume_horizontal(child, start_row, cursor, row_height, matched_nodes, diagnostics)
-            if result is None:
-                return None
-            cursor = result
-
-        return MatchResult(
-            block_id=block.block_id,
-            sheet=self.sheet_name,
-            anchor=(start_row, start_col),
-            orientation="horizontal",
-            matched_nodes=matched_nodes,
-            diagnostics=diagnostics,
-        )
-
-    def _infer_row_height(self, block: Block, start_row: int) -> int:
-        """Infer row height by inspecting the first Col pattern length."""
-        for child in block.children:
-            if isinstance(child, Col):
-                return len(child.pattern)
-            if isinstance(child, Group):
-                for gc in child.children:
-                    if isinstance(gc, Col):
-                        return len(gc.pattern)
-        return max(1, self.grid.num_rows - start_row)
-
-    def _consume_horizontal(
-        self,
-        node: TemplateNode,
-        start_row: int,
-        cursor: int,
-        row_height: int,
-        matched_nodes: list[NodeResult],
-        diagnostics: list[str],
-    ) -> int | None:
-        """Greedily consume one template node horizontally.
-
-        Returns the new cursor position, or None on failure.
-        """
-        if isinstance(node, Col):
-            count = 0
-            rep_min, rep_max = node.repeat_min, node.repeat_max
-            while rep_max is None or count < rep_max:
-                extracted, reason = self._try_match_col(start_row, cursor, node)
-                if extracted is None:
-                    if count >= rep_min and count > 0 and rep_min != rep_max:
-                        diagnostics.append(f"Col(id={node.node_id!r}) stopped at grid col {cursor}: {reason}")
-                    break
-                matched_nodes.append(NodeResult(
-                    "Col", node.node_id, count, extracted,
-                    grid_row=start_row, grid_col=cursor,
-                ))
-                count += 1
-                cursor += 1
-            if count < rep_min:
-                return None
-            return cursor
-
-        elif isinstance(node, EmptyCol):
-            count = 0
-            rep_min, rep_max = node.repeat_min, node.repeat_max
-            while rep_max is None or count < rep_max:
-                if cursor >= self.grid.num_cols:
-                    if count >= rep_min and count > 0 and rep_min != rep_max:
-                        diagnostics.append(f"EmptyCol(id={node.node_id!r}) stopped at grid col {cursor}: limit reached")
-                    break
-                is_empty, reason = self._try_match_empty_col(start_row, cursor, row_height, node.allow_whitespace)
-                if not is_empty:
-                    if count >= rep_min and count > 0 and rep_min != rep_max:
-                        diagnostics.append(f"EmptyCol(id={node.node_id!r}) stopped at grid col {cursor}: {reason}")
-                    break
-                matched_nodes.append(NodeResult(
-                    "EmptyCol", node.node_id, count, [],
-                    grid_row=start_row, grid_col=cursor,
-                ))
-                count += 1
-                cursor += 1
-            if count < rep_min:
-                return None
-            return cursor
-
-        elif isinstance(node, Group):
-            group_count = 0
-            rep_min, rep_max = node.repeat_min, node.repeat_max
-            while rep_max is None or group_count < rep_max:
-                saved_cursor = cursor
-                saved_len = len(matched_nodes)
-                saved_diag_len = len(diagnostics)
-                failed = False
-                for child in node.children:
-                    result = self._consume_horizontal(child, start_row, cursor, row_height, matched_nodes, diagnostics)
-                    if result is None:
-                        failed = True
-                        break
-                    cursor = result
-                if failed:
-                    cursor = saved_cursor
-                    del matched_nodes[saved_len:]
-                    del diagnostics[saved_diag_len:]
-                    if group_count >= rep_min and group_count > 0 and rep_min != rep_max:
-                        diagnostics.append(f"Group stopped at grid col {cursor}: inner block failed")
-                    break
-                group_count += 1
-            if group_count < rep_min:
-                return None
-            return cursor
-
+    def _match_row(self, row: list[InternalCell], symbol_map: dict[str, CompiledRule]) -> str | None:
+        """Try to match a row against all compiled rules. Return symbol char or None."""
+        for symbol, compiled_rule in symbol_map.items():
+            if self._row_matches_rule(row, compiled_rule):
+                return symbol
         return None
 
-    def _partial_score_horizontal(
-        self, start_row: int, start_col: int, block: Block
-    ) -> tuple[float, str, str | None, str | None]:
-        """Count the fraction of top-level children matched before first failure.
+    def _row_matches_rule(self, row: list[InternalCell], compiled_rule: CompiledRule) -> bool:
+        if len(row) != len(compiled_rule.rules):
+            return False
 
-        Used for near-miss hint generation only; does not modify state.
-        Returns (matched_ratio, description_of_failure, expected, got).
-        """
-        row_height = self._infer_row_height(block, start_row)
-        cursor = start_col
-        total = len(block.children)
-        if total == 0:
-            return 1.0, "", None, None
+        matched = 0
+        for cell, rule in zip(row, compiled_rule.rules):
+            if self._cell_matches(cell, rule, compiled_rule.normalize, compiled_rule.min_similarity):
+                matched += 1
 
-        for i, child in enumerate(block.children):
-            dummy: list[NodeResult] = []
-            dummy_diag: list[str] = []
-            result = self._consume_horizontal(child, start_row, cursor, row_height, dummy, dummy_diag)
-            if result is None:
-                child_desc = type(child).__name__
-                if hasattr(child, "node_id") and child.node_id:
-                    child_desc += f"(id={child.node_id!r})"
-                failed_at = f"{child_desc} at grid col {cursor}"
-                expected_str, got_str = self._col_failure_info_horizontal(child, start_row, cursor)
-                return i / total, failed_at, expected_str, got_str
-            cursor = result
+        if compiled_rule.match_ratio is not None:
+            return (matched / len(row)) >= compiled_rule.match_ratio
+        return matched == len(row)
 
-        return 1.0, "", None, None
+    def _cell_matches(
+        self,
+        cell: InternalCell,
+        rule: CompiledCellCondition,
+        normalize: bool,
+        min_similarity: float | None,
+    ) -> bool:
+        # Check is_merged first — fast reject
+        if rule.is_merged != cell.is_merged:
+            return False
 
-    def _col_failure_info_horizontal(
-        self, node: TemplateNode, start_row: int, grid_col: int
-    ) -> tuple[str | None, str | None]:
-        """Return (expected_desc, got_value) for the first mismatching cell in a Col node.
+        cell_value = cell.value or ""
 
-        Scans through successful repetitions first so that repeated nodes
-        correctly report the column where the match broke down.
-        """
-        if not isinstance(node, Col) or not node.pattern:
-            return None, None
-        current = grid_col
-        upper = node.repeat_max if node.repeat_max is not None else self.grid.num_cols
-        for _ in range(upper):
-            if current >= self.grid.num_cols:
-                break
-            cells = self.grid.get_col_slice(start_row, current, len(node.pattern))
-            for cell, cond in zip(cells, node.pattern):
-                if not _cell_matches(cell, cond):
-                    return _condition_desc(cond), repr(cell.value)
-            current += 1
-        return None, None
+        if isinstance(rule.pattern, str):
+            if normalize:
+                cell_value = cell_value.strip().lower()
 
+            if min_similarity is not None:
+                return fuzz.ratio(rule.pattern, cell_value) / 100.0 >= min_similarity
+            return rule.pattern == cell_value
+        return bool(rule.pattern.fullmatch(cell_value))
 
+    # ------------------------------------------------------------------
+    # Compile Parts
+    # ------------------------------------------------------------------
 
-    # ------------------------------------------------------------------ #
-    # Full-sheet scan                                                     #
-    # ------------------------------------------------------------------ #
+    def _compile(self, block: Block) -> tuple[str, dict[str, CompiledRule]]:
+        self._seen: dict[CompiledRule, str] = {}
+        self._counter: int = 0
+        self._symbol_map: dict[str, CompiledRule] = {}
 
-    def scan_for_blocks(self, templates: list[Block]) -> MatchOutput:
-        opts = self.options
-        sr = opts.search_range
+        parts = [self._visit(child) for child in block.children]
+        return "".join(parts), self._symbol_map
 
-        row_start = sr[0] if sr else 0
-        col_start = sr[1] if sr else 0
-        row_end   = sr[2] if sr else self.grid.num_rows - 1
-        col_end   = sr[3] if sr else self.grid.num_cols - 1
+    def _register(self, node: TemplateNode) -> str:
+        def _process_pattern(r: str | CellCondition, normalize: bool) -> CompiledCellCondition:
+            if isinstance(r, str):
+                if normalize:
+                    r = r.strip().lower()
+                return CompiledCellCondition(pattern=r, is_merged=False)
+            return CompiledCellCondition(
+                pattern=re.compile('|'.join(list(r.patterns))),
+                is_merged=r.is_merged
+            )
 
-        # Consumption mask: sort largest-first and track claimed cells.
-        if opts.consume_matched_regions:
-            templates = sorted(templates, key=_estimate_area, reverse=True)
-        consumed: set[tuple[int, int]] = set()
+        key = CompiledRule(
+            rules=tuple(
+                _process_pattern(r, node.normalize)
+                for r in node.rules()
+            ),
+            normalize=node.normalize,
+            min_similarity=node.min_similarity,
+            match_ratio=node.match_ratio,
+        )
+        if key not in self._seen:
+            if self._counter > 0xFFFF:
+                raise RuntimeError("Too many unique rules (>65534), this is likely a bug")
+            symbol_char = chr(0xF0000 + self._counter)
+            self._counter += 1
+            self._seen[key] = symbol_char
+            self._symbol_map[symbol_char] = key
+        return self._seen[key]
 
-        results: list[MatchResult] = []
-        near_misses: list[NearMissHint] = []
+    @staticmethod
+    def _repeat_suffix(node: TemplateNode) -> str:
+        lo, hi = node.repeat_range
+        if (lo, hi) == (1, 1):
+            return ""
+        if (lo, hi) == (0, 1):
+            return "?"
+        if (lo, hi) == (0, None):
+            return "*"
+        if (lo, hi) == (1, None):
+            return "+"
+        if lo == hi:
+            return f"{{{lo}}}"
+        if hi is None:
+            return f"{{{lo},}}"
+        return f"{{{lo},{hi}}}"
 
-        for template in templates:
-            for r in range(row_start, row_end + 1):
-                for c in range(col_start, col_end + 1):
-                    if template.orientation == "vertical":
-                        result = self._try_match_block_vertical(r, c, template)
-                    else:
-                        result = self._try_match_block_horizontal(r, c, template)
-
-                    if result is not None:
-                        # Consumption-mask overlap check
-                        if opts.consume_matched_regions:
-                            r1, c1, r2, c2 = result.bounding_box
-                            overlap = any(
-                                (rr, cc) in consumed
-                                for rr in range(r1, r2 + 1)
-                                for cc in range(c1, c2 + 1)
-                            )
-                            if overlap:
-                                continue
-                            # Claim all cells in this bounding box
-                            for rr in range(r1, r2 + 1):
-                                for cc in range(c1, c2 + 1):
-                                    consumed.add((rr, cc))
-
-                        if opts.return_mode == "FIRST":
-                            return MatchOutput(results=[result])
-                        results.append(result)
-
-                    elif opts.near_miss_threshold is not None:
-                        if template.orientation == "vertical":
-                            ratio, failed_at, expected, got = self._partial_score_vertical(r, c, template)
-                        else:
-                            ratio, failed_at, expected, got = self._partial_score_horizontal(r, c, template)
-                        if ratio >= opts.near_miss_threshold:
-                            near_misses.append(NearMissHint(
-                                block_id=template.block_id,
-                                sheet=self.sheet_name,
-                                anchor=(r, c),
-                                orientation=template.orientation,
-                                matched_ratio=ratio,
-                                failed_at=failed_at,
-                                expected=expected,
-                                got=got,
-                            ))
-
-        return MatchOutput(results=results, near_misses=near_misses)
+    def _visit(self, node: TemplateNode) -> str:
+        suffix = self._repeat_suffix(node)
+        if isinstance(node, AltNode):
+            parts = [self._visit(alt) for alt in node.alternatives]
+            return f"({'|'.join(parts)}){suffix}"
+        if isinstance(node, Group):
+            parts = [self._visit(child) for child in node.children]
+            return f"({''.join(parts)}){suffix}"
+        return f"{self._register(node)}{suffix}"
 
 
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
+
 def match_template(
-    file: str | Path,
-    template: "Block | list[Block]",
-    sheet: "str | int | list[str | int] | None" = None,
+    file_path: str | Path,
+    template: Block | list[Block],
+    sheet: str | int | list[str | int] | None = None,
     options: MatchOptions | None = None,
 ) -> MatchOutput:
     """Extract data from an Excel file using a template description.
 
     Parameters
     ----------
-    file     : path to the Excel file
-    template : a Block or list of Block objects describing the expected layout
-    sheet    : sheet name, 0-based index, list of names/indices, or ``None``
-               to scan **all** sheets (default).
-               Pass ``"*"`` as an alias for None (scan all sheets).
-    options  : MatchOptions instance; defaults to MatchOptions()
+    file_path   : path to the Excel file
+    template    : a Block or list of Block objects describing the expected layout
+    sheet       : sheet name, 0-based index, list of names/indices, or ``None``
+                   to scan **all** sheets (default).
+                   Pass ``"*"`` as an alias for None (scan all sheets).
+    options     : MatchOptions instance; defaults to MatchOptions()
 
     Returns
     -------
@@ -757,63 +280,69 @@ def match_template(
     templates = template if isinstance(template, list) else [template]
 
     # Resolve the list of sheets to scan
-    path_str = str(file)
-    wb_xls = None
-    wb_xlsx = None
-    
+    path_str = str(file_path)
+    wb_xlrd = None
+    wb_openpyxl = None
+    all_sheet_names = []
+
     if path_str.lower().endswith(".xls"):
-        try:
-            import xlrd
-        except ImportError:
-            raise ImportError(
-                "excel_extractor requires xlrd for .xls files. "
-                "Install with: pip install xlrd  or  pip install mypkg[excel]"
-            )
-        wb_xls = xlrd.open_workbook(path_str, formatting_info=True)
-        if sheet is None or sheet == "*":
-            sheets_to_scan: list[str | int] = wb_xls.sheet_names()
-        elif isinstance(sheet, list):
-            sheets_to_scan = sheet
-        else:
-            sheets_to_scan = [sheet]
+        wb_xlrd = xlrd.open_workbook(path_str, formatting_info=True)
+        all_sheet_names = wb_xlrd.sheet_names()
+
+    elif path_str.lower().endswith(".xlsx") or path_str.lower().endswith(".xlsm"):
+        wb_openpyxl = openpyxl.load_workbook(path_str, data_only=True)
+        all_sheet_names = wb_openpyxl.sheetnames
+
+    if (wb_xlrd is None and wb_openpyxl is None) or not all_sheet_names:
+        raise ValueError(f"Can not read {path_str}")
+
+    if sheet is None:
+        sheets_to_scan = all_sheet_names
     else:
+        if not isinstance(sheet, list):
+            sheet = [sheet]
         try:
-            import openpyxl
-        except ImportError:
-            raise ImportError(
-                "excel_extractor requires openpyxl. "
-                "Install with: pip install openpyxl  or  pip install mypkg[excel]"
-            )
-        wb_xlsx = openpyxl.load_workbook(path_str, data_only=True)
-        if sheet is None or sheet == "*":
-            sheets_to_scan: list[str | int] = wb_xlsx.sheetnames
-        elif isinstance(sheet, list):
-            sheets_to_scan = sheet
-        else:
-            sheets_to_scan = [sheet]
+            sheets_to_scan: list[str] = [
+                all_sheet_names[s] if isinstance(s, int) else s for s in sheet
+            ]
+        except IndexError as e:
+            raise ValueError(
+                f"Sheet index should less than {len(all_sheet_names)}."
+            ) from e
+
+        not_found_sheet = [s for s in sheets_to_scan if s not in all_sheet_names]
+        if not_found_sheet:
+            raise ValueError(f"Sheet {', '.join(not_found_sheet)} not found.")
 
     merged_results: list = []
     merged_near_misses: list = []
 
-    from mypkg.excel_extractor.normalizer import _load_xls_from_wb, _load_xlsx_from_wb
+    template_matcher = TemplateMatcher(templates, options)
 
-    for sh in sheets_to_scan:
-        if wb_xls is not None:
-            grid, sheet_name = _load_xls_from_wb(wb_xls, sh)
+    for sheet_name in sheets_to_scan:
+        if wb_xlrd is not None:
+            grid = _load_xls_from_wb(wb_xlrd, sheet_name)
+        elif wb_openpyxl is not None:
+            grid = _load_xlsx_from_wb(wb_openpyxl, sheet_name)
         else:
-            grid, sheet_name = _load_xlsx_from_wb(wb_xlsx, sh)
-            
-        matcher = TemplateMatcher(grid, sheet_name, options)
-        output = matcher.scan_for_blocks(templates)
+            raise ValueError("Unexpected error: None of sheet is loaded.")
 
+        # Start matching
+        output = template_matcher.scan_for_blocks(grid)
+        print(output)
+        exit(0)
+        # Check progress
+        flag_complete = False
         if options.return_mode == "FIRST" and output.results:
-            if wb_xlsx is not None:
-                wb_xlsx.close()
-            return output  # stop on first match across all sheets
+            flag_complete = True
 
         merged_results.extend(output.results)
         merged_near_misses.extend(output.near_misses)
 
-    if wb_xlsx is not None:
-        wb_xlsx.close()
+        if flag_complete:
+            break
+
+    # Clean up
+    if wb_openpyxl is not None:
+        wb_openpyxl.close()
     return MatchOutput(results=merged_results, near_misses=merged_near_misses)
