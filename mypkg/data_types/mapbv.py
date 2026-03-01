@@ -23,7 +23,7 @@ _Operand = Union["MapBV", "MapBVSlice", "MapBVExpr", int]
 # StructSegment  — returned by MapBV.structure
 # ---------------------------------------------------------------------------
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class StructSegment:
     """Describes one piece of a linked MapBV's composition.
 
@@ -42,6 +42,7 @@ class StructSegment:
 
 class _LogicOpsMixin:
     """Mixin providing &, |, ^, ~, <<, >> operators."""
+    _width: int
 
     # Subclasses must provide .width (int)
 
@@ -365,9 +366,9 @@ class MapBV(_LogicOpsMixin):
 
     def __init__(
         self,
-        name_or_value: Union[str, int],
+        name_or_value: str | int,
         width: int,
-        tags: Optional[dict] = None,
+        tags: dict | None = None,
     ) -> None:
         if width <= 0:
             raise ValueError(f"Width must be > 0, got {width}")

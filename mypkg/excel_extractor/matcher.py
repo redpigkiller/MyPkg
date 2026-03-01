@@ -1,18 +1,15 @@
 from __future__ import annotations
 from pathlib import Path
-from typing import Any, Literal
 from dataclasses import dataclass
 import re
 
 import xlrd
 import openpyxl
 from rapidfuzz import fuzz
-from mypkg.excel_extractor.types import CellCondition, Types
+from mypkg.excel_extractor.types import CellCondition
 from mypkg.excel_extractor.template import (
     Block,
-    EmptyRow,
     Group,
-    Row,
     TemplateNode,
     AltNode,
 )
@@ -97,6 +94,7 @@ class TemplateMatcher:
     # ------------------------------------------------------------------
 
     def scan_for_blocks(self, grid: InternalGrid) -> list[list[BlockMatch]]:
+        # TODO Support horizaontal orientation
         match_results = []
         for compiled_template in self.compiled_templates:
             cid_grid = self._match_grid(grid, compiled_template.cond_id_map_rv)
@@ -159,6 +157,8 @@ class TemplateMatcher:
                 compile_rule_id_sequence.append(symbol)
         joined = "".join(rid.symbol for rid in compile_rule_id_sequence)
 
+        # TODO Maybe use other method to deal with group, '*', '+', ... operation
+        # TODO Maybe use Huffman coding to encode data instead of unicode
         m = re.match(compiled_template.regex, joined)
         if m:
             return True, m.group(0)
