@@ -10,10 +10,15 @@ Classes:
 
 from __future__ import annotations
 
+import uuid
 import warnings
 from copy import deepcopy
 from dataclasses import dataclass
 from abc import ABC, abstractmethod
+from typing import Dict, List, Optional, Tuple, Union
+
+# Type alias for anything that carries a .value / .width
+_Operand = Union["MapBV", "MapBVSlice", "MapBVExpr", int]
 
 
 # ---------------------------------------------------------------------------
@@ -60,18 +65,16 @@ class _BVBase(ABC):
         return self.value
 
     def __eq__(self, other: object) -> bool:
-        return self is other
+        if isinstance(other, int):
+            return self.value == other
+        if isinstance(other, (MapBV, MapBVSlice, MapBVExpr)):
+            return self.value == other.value
+        return NotImplemented
 
     def __hash__(self) -> int:
         return id(self)
 
-    def value_eq(self, other: "MapBV | int") -> bool:
-        """Compare values, not identity."""
-        if isinstance(other, int):
-            return self.value == other
-        return self.value == other.value
-
-    # -- operators ---------------------------------------------------------
+    # -- formatting ---------------------------------------------------------
 
     def to_hex(self) -> str:
         """Return value as hex string, e.g. ``'0x000F'``."""
@@ -91,25 +94,21 @@ class _BVBase(ABC):
 
     # -- formatting ---------------------------------------------------------
 
-    def __and__(self, other: MapBV | MapBVExpr | int) -> "MapBVExpr":
-        if isinstance(other, int) and other >= (1 << self.width):
-            raise ValueError(
-                f"Operand 0x{other:X} exceeds MapBV width {self.width}"
-            )
+    def __and__(self, other: _Operand) -> "MapBVExpr":
         w = self.width if isinstance(other, int) else max(self.width, other.width)
         return MapBVExpr("&", [self, other], w)
 
     def __rand__(self, other: int) -> "MapBVExpr":
         return MapBVExpr("&", [other, self], self.width)
 
-    def __or__(self, other: MapBV | MapBVExpr | int) -> "MapBVExpr":
+    def __or__(self, other: _Operand) -> "MapBVExpr":
         w = self.width if isinstance(other, int) else max(self.width, other.width)
         return MapBVExpr("|", [self, other], w)
 
     def __ror__(self, other: int) -> "MapBVExpr":
         return MapBVExpr("|", [other, self], self.width)
 
-    def __xor__(self, other: MapBV | MapBVExpr | int) -> "MapBVExpr":
+    def __xor__(self, other: _Operand) -> "MapBVExpr":
         w = self.width if isinstance(other, int) else max(self.width, other.width)
         return MapBVExpr("^", [self, other], w)
 
@@ -151,7 +150,7 @@ class MapBVExpr(_BVBase):
     # -- resolve helper -----------------------------------------------------
 
     @staticmethod
-    def _resolve(operand: MapBV | MapBVExpr | int, ctx: dict[str, int] | None = None) -> int:
+    def _resolve(operand: _Operand, ctx: dict[str, int] | None = None) -> int:
         if isinstance(operand, int):
             return operand
         if ctx is not None:
@@ -188,87 +187,241 @@ class MapBVExpr(_BVBase):
             return (a >> b) & self._mask
         raise ValueError(f"Unknown operator: {self._op}")
 
+    # -- dunder -------------------------------------------------------------
+
+    def __len__(self) -> int:
+        return self._width
+
+    def __int__(self) -> int:
+        return self.value
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, int):
+            return self.value == other
+        if isinstance(other, (MapBV, MapBVSlice, MapBVExpr)):
+            return self.value == other.value
+        return NotImplemented
+
+    def __hash__(self) -> int:
+        return id(self)
+
+    def __repr__(self) -> str:
+        ops = ", ".join(repr(o) for o in self._operands)
+        return f"MapBVExpr({self._op}, [{ops}])"
+
+    # -- formatting ---------------------------------------------------------
+
+    def to_hex(self) -> str:
+        ndigits = (self._width + 3) // 4
+        return f"0x{self.value:0{ndigits}X}"
+
+    def to_bin(self) -> str:
+        return f"0b{self.value:0{self._width}b}"
+
+    def __format__(self, spec: str) -> str:
+        if spec in ("x", "X", "hex"):
+            return self.to_hex()
+        if spec in ("b", "bin"):
+            return self.to_bin()
+        return format(self.value, spec)
+
+
+# ---------------------------------------------------------------------------
+# MapBVSlice  — proxy returned by MapBV.__getitem__
+# ---------------------------------------------------------------------------
+
+class MapBVSlice(_BVBase):
+    """Lightweight proxy representing ``parent[high:low]``.
+
+    The slice uses *inclusive* bounds on both ends, matching the hardware
+    convention ``[7:0]`` = 8 bits.
+    """
+
+    __slots__ = ("_parent", "_high", "_low")
+
+    def __init__(self, parent: "MapBV", high: int, low: int) -> None:
+        if high < low:
+            raise ValueError(
+                f"MapBVSlice high ({high}) must be >= low ({low})"
+            )
+        if high >= parent.width:
+            raise ValueError(
+                f"MapBVSlice high bit {high} exceeds parent width {parent.width}"
+            )
+        if low < 0:
+            raise ValueError(f"MapBVSlice low bit must be >= 0, got {low}")
+        self._parent = parent
+        self._high = high
+        self._low = low
+
+
+    # -- value access -------------------------------------------------------
+
+    @property
+    def value(self) -> int:
+        """Read bits [high:low] from the parent MapBV."""
+        mask = (1 << self.width) - 1
+        return (self._parent.value >> self._low) & mask
+
+    @value.setter
+    def value(self, val: int) -> None:
+        """Write bits [high:low] into the parent MapBV."""
+        mask = (1 << self.width) - 1
+        val &= mask
+        parent_val = self._parent.value
+        clear_mask = ~(mask << self._low) & ((1 << self._parent.width) - 1)
+        self._parent.value = (parent_val & clear_mask) | (val << self._low)
+
+    # -- symbolic eval ------------------------------------------------------
+
+    def eval(self, ctx: Dict[str, int]) -> int:
+        """Evaluate this slice symbolically using *ctx*."""
+        parent_val = self._parent.eval(ctx)
+        mask = (1 << self.width) - 1
+        return (parent_val >> self._low) & mask
+
+    # -- linking (slice as target) ------------------------------------------
+
+    def link(self, *parts: Union["MapBV", "MapBVSlice"]) -> None:
+        """Link parts into this slice of the parent MapBV.
+
+        This restructures the parent so that the slice region
+        ``[high:low]`` is replaced by a linked sub-MapBV composed of *parts*.
+        The upper and lower bit regions (if any) are preserved as
+        independent helper BVs to avoid self-referencing recursion.
+        """
+        total = sum(p.width for p in parts)
+        if total != self.width:
+            raise ValueError(
+                f"Link width mismatch: parts total {total} bits, "
+                f"but slice [{self._high}:{self._low}] is {self.width} bits"
+            )
+        if self._parent._is_linked:
+            import warnings
+            warnings.warn(
+                f"MapBV '{self._parent.name}' is already linked. "
+                f"Overwriting existing link structure via slice link.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        # Snapshot the current raw value BEFORE restructuring
+        cur_val = self._parent.value
+        parent_w = self._parent.width
+
+        # Build a helper MapBV for the linked slice region
+        helper = MapBV(f"_{self._parent.name}[{self._high}:{self._low}]", self.width)
+        helper._is_linked = True
+        helper._link_member = list(parts)
+
+        # Build independent BVs for preserved upper/lower regions
+        pieces: List[Union[MapBV, MapBVSlice]] = []
+        if self._high < parent_w - 1:
+            upper_w = parent_w - 1 - self._high
+            upper_bv = MapBV(f"_{self._parent.name}[{parent_w-1}:{self._high+1}]", upper_w)
+            upper_bv._raw_value = (cur_val >> (self._high + 1)) & ((1 << upper_w) - 1)
+            pieces.append(upper_bv)
+        pieces.append(helper)
+        if self._low > 0:
+            lower_w = self._low
+            lower_bv = MapBV(f"_{self._parent.name}[{self._low-1}:0]", lower_w)
+            lower_bv._raw_value = cur_val & ((1 << lower_w) - 1)
+            pieces.append(lower_bv)
+
+        self._parent._is_linked = True
+        self._parent._link_member = pieces
+
+    # -- dunder -------------------------------------------------------------
+
+    def __len__(self) -> int:
+        return self.width
+
+    def __int__(self) -> int:
+        return self.value
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, int):
+            return self.value == other
+        if isinstance(other, (MapBV, MapBVSlice, MapBVExpr)):
+            return self.value == other.value
+        return NotImplemented
+
+    def __hash__(self) -> int:
+        return id(self)
+
+    def __repr__(self) -> str:
+        return f"MapBVSlice({self._parent.name}[{self._high}:{self._low}])"
+
+    # -- formatting ---------------------------------------------------------
+
+    def to_hex(self) -> str:
+        """Return value as hex string, e.g. ``'0x0F'``."""
+        ndigits = (self.width + 3) // 4
+        return f"0x{self.value:0{ndigits}X}"
+
+    def to_bin(self) -> str:
+        """Return value as binary string, e.g. ``'0b00001111'``."""
+        return f"0b{self.value:0{self.width}b}"
+
+    def __format__(self, spec: str) -> str:
+        if spec in ("x", "X", "hex"):
+            return self.to_hex()
+        if spec in ("b", "bin"):
+            return self.to_bin()
+        return format(self.value, spec)
+
+
+
 # ---------------------------------------------------------------------------
 # MapBV  — the main BitVector class
 # ---------------------------------------------------------------------------
 
 class MapBV(_BVBase):
-    __slots__ = (
-        "_name",
-        "_parent",
-        "_high", "_low", "_width", "_mask",
-        "_type",                                # "CONST" | "VAR" | "SLICE"
-        "_raw_value",
-        "_tags",
-        "_eval_key",
-        "_link_bv_list",
-    )
+    """A symbolic BitVector node.
+
+    Usage::
+
+        # Named variable
+        reg0 = MapBV("REG0", 16, tags={"type": "RW", "addr": 0x100})
+
+        padding = MapBV(0, 2)
+    """
+
+    _name: str
+    _value: int
+    _tags: dict | None
+    _is_const: bool
+
+    _width: int
+    _link_member: list[MapBV | MapBVSlice]
+
+    _mask: int
+    _eval_key: int
 
     def __init__(
         self,
-        parent: str | MapBV | None,
-        high: int,
-        low: int,
+        name: str,
+        width: int,
         value: int = 0,
+        is_const: bool = False,
         tags: dict | None = None,
     ) -> None:
-        
-        if parent is None or isinstance(parent, str):
-            # New instance
-            if low != 0:
-                raise ValueError()
-            
-            # 1. width
-            self._width = high - low + 1
-            if self._width <= 0:
-                raise ValueError(f"Width must be > 0, got {self._width}")
-            self._low = low
-            self._high = high
+        if width <= 0:
+            raise ValueError(f"Width must be > 0, got {width}")
+        if not name.isidentifier():
+            raise ValueError(f"Invalid name: {name}")
+        if not 0 <= value < (1 << width):
+            raise ValueError(f"Invalid value: {value}")
 
-            # 2. raw_value
-            if not 0 <= value < (1 << self._width):
-                raise ValueError(f"Invalid value: {value}")
-            self._raw_value = value
-
-            # 3. name & tags
-            if parent is None:
-                self._name = "Constant"
-                self._parent = None
-                self._type = "CONST"
-                self._tags = None
-
-            else:
-                if not parent.isidentifier():
-                    raise ValueError(f"Invalid name: {parent}")
-                self._name = parent
-                self._parent = None
-                self._type = "VAR"
-                self._tags = tags
-
-        elif isinstance(parent, MapBV):
-            # 1. width
-            self._width = high - low + 1
-            if not (parent.low <= low <= high <= parent.high):
-                raise ValueError(f"Width must be > 0, got {self._width}")
-            self._low = low
-            self._high = high
-            
-            # 2. raw_value
-            if not 0 <= value < (1 << self._width):
-                raise ValueError(f"Invalid value: {value}")
-            self._raw_value = value
-            
-            # 3. name & tags
-            self._name = f"{parent.name}[{high}:{low}]"
-            self._parent = parent
-            self._type = "SLICE"
-            if tags is not None:
-                raise ValueError()
-            
+        self._name = name
+        self._value = value
+        self._width = width
+        self._is_const = is_const
+        if is_const:
+            self._tags = None
         else:
-            raise ValueError()
-
-        self._mask = (1 << self._width) - 1
+            self._tags = tags
+        self._mask = (1 << width) - 1
 
         # Pre-compute hashable eval key: (name, frozenset(tags.items()))
         # Falls back to None if tags contain unhashable values (e.g. lists)
@@ -281,7 +434,7 @@ class MapBV(_BVBase):
             self._eval_key = None
 
         # Linking state
-        self._link_bv_list: list[MapBV] = []
+        self._link_member: list[MapBV | MapBVSlice] = []
 
     # -- basic properties ---------------------------------------------------
 
@@ -296,40 +449,18 @@ class MapBV(_BVBase):
     @property
     def tags(self) -> dict | None:
         return self._tags
-    
-    @property
-    def high(self) -> int:
-        return self._high
 
-    @property
-    def low(self) -> int:
-        return self._low
-
-    @property
-    def slice_info(self) -> tuple[MapBV, int, int] | None:
-        if self._parent is not None:
-            return (self._parent, self._high, self._low)
-        return None
-    
-    @property
-    def type(self) -> str:
-        return self._type
-    
     # -- value access -------------------------------------------------------
 
     @property
     def value(self) -> int:
         """Read value.  If linked, concatenate children (MSB-first)."""
-        if self._parent is not None:
-            mask = (1 << self._width) - 1
-            return (self._parent.value >> self._low) & mask
-        
-        if self._link_bv_list:
+        if self._link_member:
             result = 0
-            for child in self._link_bv_list:
+            for child in self._link_member:
                 result = (result << child.width) | child.value
             return result
-        return self._raw_value
+        return self._value
 
     @value.setter
     def value(self, val: int) -> None:
@@ -337,14 +468,8 @@ class MapBV(_BVBase):
 
         Writing to a constant raises a warning and is ignored.
         """
-        if self._parent is not None:
-            mask = (1 << self._width) - 1
-            val &= mask
-            clear = ~(mask << self._low) & ((1 << self._parent.width) - 1)
-            self._parent.value = (self._parent.value & clear) | (val << self._low)
-            return
-    
-        if self._type == "CONST":
+        val &= self._mask
+        if self._is_const:
             warnings.warn(
                 f"Attempted to write 0x{val:X} to constant MapBV "
                 f"(width={self._width}). Write ignored.",
@@ -352,74 +477,52 @@ class MapBV(_BVBase):
                 stacklevel=2,
             )
             return
-        
-        val &= self._mask
-        if self._link_bv_list:
+        if self._link_member:
             offset = 0
-            for child in reversed(self._link_bv_list):
+            for child in reversed(self._link_member):
                 child_mask = (1 << child.width) - 1
                 child.value = (val >> offset) & child_mask
                 offset += child.width
         else:
-            self._raw_value = val
+            self._value = val
 
     # -- linking ------------------------------------------------------------
-    def _collect_linked(self, visited: set) -> None:
-        for child in self._link_bv_list:
-            visited.add(id(child))
-            child._collect_linked(visited)  # pylint: disable=protected-access
 
-    def link(self, *parts: MapBV, force: bool = False) -> None:
+    def link(self, *parts: Union["MapBV", "MapBVSlice"], force: bool = False) -> None:
         """Define this MapBV as a concatenation of *parts* (MSB → LSB order).
 
         The total width of all parts must equal ``self.width``.
         Re-linking a MapBV that is already linked emits a warning.
         """
-        for p in parts:
-            reachable = set()
-            p._collect_linked(reachable)    # pylint: disable=protected-access
-            if id(self) in reachable or id(p) == id(self):
-                raise ValueError(
-                    f"Circular link detected: '{self._name}' cannot link to '{p.name}'"
-                )
-        
-        total = 0
-        for p in parts:
-            if p.type == "CONST":
-                warnings.warn(
-                    f"Linking a CONST MapBV into '{self._name}'. Writes to this segment will be ignored.",
-                    UserWarning,
-                )
-            total += p.width
-
+        total = sum(p.width for p in parts)
         if total != self._width:
             raise ValueError(
                 f"Link width mismatch: parts total {total} bits, "
                 f"but {self._name} is {self._width} bits"
             )
-        if self._link_bv_list and force is False:
+        if self._link_member and force is False:
             warnings.warn(
                 f"MapBV '{self._name}' is already linked. "
                 f"Overwriting existing link structure.",
                 UserWarning,
                 stacklevel=2,
             )
-        self._link_bv_list = list(parts)
+        self._link_member = list(parts)
 
     def unlink(self) -> None:
         """Remove the link structure, snapshot the current value.
 
         After unlinking, the MapBV holds its last computed value as a raw value.
         """
-        if not self._link_bv_list:
+        if not self._link_member:
             return
         # Snapshot the current composite value
-        self._raw_value = self.value
-        self._link_bv_list = []
+        self._value = self.value
+        self._link_member = []
 
     # -- slicing ------------------------------------------------------------
 
-    def __getitem__(self, key: int | slice) -> MapBV:
+    def __getitem__(self, key: int | slice) -> MapBVSlice:
         """``bv[high:low]`` → MapBVSlice (inclusive both ends)."""
         if isinstance(key, int):
             high = low = key
@@ -430,7 +533,7 @@ class MapBV(_BVBase):
         
         if high is None or low is None:
             raise ValueError("Both high and low must be specified: bv[high:low]")
-        return MapBV(self, high, low)
+        return MapBVSlice(self, high, low)
 
     # -- symbolic eval ------------------------------------------------------
 
@@ -448,17 +551,12 @@ class MapBV(_BVBase):
           2. Name-only string key — applies to all
           3. Current ``.value`` (fallback)
         """
-        if self._type == "CONST":
-            return self._raw_value
+        if self._is_const:
+            return self._value
 
-        if self._parent is not None:
-            parent_val = self._parent.eval(ctx)
-            mask = (1 << self._width) - 1
-            return (parent_val >> self._low) & mask
-    
-        if self._link_bv_list:
+        if self._link_member:
             result = 0
-            for child in self._link_bv_list:
+            for child in self._link_member:
                 result = (result << child.width) | child.eval(ctx)
             return result
 
@@ -471,21 +569,21 @@ class MapBV(_BVBase):
             return ctx[self._name] & self._mask
 
         # 3. Fallback to current value
-        return self._raw_value
+        return self._value
 
     # -- structure introspection --------------------------------------------
 
     @property
-    def structure(self) -> list[StructSegment]:
+    def structure(self) -> List[StructSegment]:
         """Return the linked composition as a list of ``StructSegment``."""
-        if not self._link_bv_list:
+        if not self._link_member:
             return []
-        segments: list[StructSegment] = []
-        for child in self._link_bv_list:
-            info = child.slice_info
-            if info is not None:
-                bv, high, low = info
-                segments.append(StructSegment(bv=bv, slice_range=(high, low)))
+        segments: List[StructSegment] = []
+        for child in self._link_member:
+            if isinstance(child, MapBVSlice):
+                segments.append(
+                    StructSegment(bv=child.parent, slice_range=(child.high, child.low))
+                )
             else:
                 segments.append(StructSegment(bv=child, slice_range=None))
         return segments
@@ -507,7 +605,7 @@ class MapBV(_BVBase):
         return (name, frozenset(tags.items()))
 
     @property
-    def eval_key(self) -> tuple | None:
+    def eval_key(self) -> Optional[tuple]:
         """The hashable key that ``eval()`` uses to look up this MapBV.
 
         Returns ``None`` for constants or BVs with empty tags.
@@ -515,25 +613,28 @@ class MapBV(_BVBase):
         return self._eval_key
 
     @classmethod
-    def concat(cls, *parts: MapBV, name: str = "CONCAT") -> MapBV:
+    def concat(cls, *parts: Union["MapBV", "MapBVSlice"], name: str = "CONCAT") -> "MapBV":
         """Create a new linked MapBV by concatenating *parts* (MSB → LSB).
 
         Automatically computes the total width.
         """
         total = sum(p.width for p in parts)
-        new_bv = cls(name, total - 1, 0)
-        new_bv._link_bv_list = list(parts)
-        return new_bv
+        bv = cls(name, total)
+        bv._link_member = list(parts)
+        return bv
 
     # -- copy / snapshot ----------------------------------------------------
 
-    def copy(self, new_name: str | None = None) -> MapBV:
+    def copy(self, new_name: Optional[str] = None) -> "MapBV":
         """Create an independent copy with the current value, no links."""
         n = new_name if new_name is not None else f"{self._name}_copy"
-        new_bv = MapBV(n, self._width - 1, 0, value=self.value, tags=deepcopy(self._tags))
+        new_bv = MapBV(n, self._width, tags=deepcopy(self._tags))
+        new_bv.value = self.value  # snapshot composite value
         return new_bv
 
+    snapshot = copy  # alias
+
     def __repr__(self) -> str:
-        if self._type == "CONST":
-            return f"MapBV(0x{self._raw_value:X}, {self._width})"
-        return f"MapBV(\"{self._name}\", {self._width})"
+        if self._is_const:
+            return f"MapBV(0x{self._value:X}, {self.width})"
+        return f"MapBV(\"{self.name}\", {self.width})"
