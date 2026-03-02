@@ -16,7 +16,7 @@ Reading structured data from Excel files is tedious. Every time the layout shift
 ### Step 1 — Install
 
 ```bash
-pip install -e .[excel]   # adds openpyxl dependency
+pip install -e .[excel]   # adds openpyxl, xlrd, rapidfuzz dependencies
 ```
 
 ### Step 2 — Describe your template
@@ -33,8 +33,8 @@ Suppose your Excel sheet looks like this:
 from mypkg.excel_extractor import match_template, Block, Row, Types
 
 template = Block(
-    Row(["Dept", "Name", "Salary"], node_id="header"),  # exact header match
-    Row([Types.STR, Types.STR, Types.INT],
+    Row(pattern=["Dept", "Name", "Salary"], node_id="header"),  # exact header match
+    Row(pattern=[Types.STR, Types.STR, Types.INT],
         repeat="+", node_id="data"),                    # one or more data rows
     block_id="salary_table",
 )
@@ -43,12 +43,16 @@ template = Block(
 ### Step 3 — Run
 
 ```python
-output = match_template("report.xlsx", template)
+# match_template returns list[list[list[BlockMatch]]]
+#   dim 0: per sheet scanned
+#   dim 1: per template provided
+#   dim 2: per match found
+results = match_template("report.xlsx", template)
 
-for result in output.results:
-    print(result.anchor)                             # (row, col) where block was found
-    records = result.to_dict(header_node="header")   # use header cells as dict keys
-    print(records)
+for block_match in results[0][0]:       # first sheet, first template
+    print(block_match.start, block_match.end)
+    for row in block_match.rows:
+        print(row.node_id, row.row, [c.value for c in row.cells])
 ```
 
 ---
@@ -59,27 +63,34 @@ for result in output.results:
 |----------|---------|
 | `Types.STR` | Any non-empty string |
 | `Types.INT` | Integer (e.g. `42`, `-7`) |
+| `Types.POS_INT` | Positive integer |
+| `Types.NEG_INT` | Negative integer |
 | `Types.FLOAT` | Float or integer (e.g. `3.14`, `42`) |
-| `Types.DATE` | ISO date string `YYYY-MM-DD` |
-| `Types.TIME` | Time string `HH:MM` |
+| `Types.SCIENTIFIC` | Scientific notation (e.g. `1.5e3`) |
+| `Types.PERCENT` | Percentage string (e.g. `12.5%`) |
+| `Types.HEX` | Hexadecimal (e.g. `0xFF`) |
+| `Types.BIN` | Binary (e.g. `0b1010`) |
+| `Types.OCT` | Octal (e.g. `0o17`) |
+| `Types.DATE_ISO` | ISO date `YYYY-MM-DD` |
+| `Types.DATE_SLASH` | Slash date `DD/MM/YYYY` |
+| `Types.TIME_24H` | 24-hour time `HH:MM` |
 | `Types.MERGED` | A cell expanded from a merge region |
-| `Types.ANY` | Any non-empty value (wildcard) |
-| `Types.ANY(n)` | `n` consecutive `Types.ANY` (e.g., `Types.ANY(3)`) |
-| `Types.EMPTY` | Truly empty cell (`None`) |
+| `Types.ANY` | Any value including empty (wildcard `.*`) |
+| `Types.ANY(n)` | `n` consecutive `Types.ANY` (syntactic sugar) |
+| `Types.EMPTY` | Normalised empty cell (`""`) |
 | `Types.SPACE` | Empty string or whitespace-only |
-| `Types.BLANK` | **`EMPTY` or `SPACE`** — any "visually blank" cell |
+| `Types.BLANK` | Same as `SPACE` — any "visually blank" cell |
 | `Types.r("regex")` | Custom regex pattern |
 
-**Combining types with `\|`:**
+**Combining types with `|`:**
 
 ```python
 Types.STR | Types.INT   # matches either a string or an integer
 ```
 
 > [!TIP]
-> Use `Types.BLANK` when you don't care whether a cell is truly absent (`None`)
-> or just contains whitespace — no need to remember the difference between
-> `EMPTY` and `SPACE`.
+> Use `Types.BLANK` when you don't care whether a cell is truly absent
+> or just contains whitespace.
 
 ---
 
@@ -92,38 +103,45 @@ Block(*children, block_id="my_block", orientation="vertical")
 ```
 
 - `orientation="vertical"` (default) — children are `Row` / `EmptyRow` / `Group`
-- `orientation="horizontal"` — children are `Col` / `EmptyCol` / `Group`
 
-### `Row` / `Col` — Pattern nodes
+### `Row` — Pattern node
 
 ```python
-Row(pattern, repeat=1, node_id=None, normalize=True, fuzzy=None)
-Col(pattern, repeat=1, node_id=None, normalize=True, fuzzy=None)
+Row(pattern, repeat=1, node_id=None, normalize=True, min_similarity=None, match_ratio=None)
 ```
 
 - `normalize=True` — strips and lowercases string cells before matching.
-- `fuzzy=0.8` (requires `rapidfuzz` installed extra `[excel]`) — matches literal string patterns with a similarity ratio >= 0.8.
+- `min_similarity=0.8` (requires `rapidfuzz`) — matches literal string patterns with a similarity ratio >= 0.8.
+- `match_ratio=0.9` — the row matches if >= 90 % of cells pass, even if some fail.
 
 `pattern` is a list where each element is:
 - A **plain string** → matched literally (e.g. `"Dept"`)
 - A **`Types` constant** → matched by type (e.g. `Types.INT`)
 - A **`Types.r(regex)`** → matched by custom regex
 
-### `EmptyRow` / `EmptyCol`
+### `EmptyRow`
 
 ```python
-EmptyRow(repeat=1, allow_whitespace=False, node_id=None)
+EmptyRow(repeat=1, allow_whitespace=True, node_id=None)
 ```
 
-Matches rows/cols where every cell is empty (`None`). Set `allow_whitespace=True` to also accept cells containing only whitespace.
+Matches rows where every cell is empty. `allow_whitespace=True` (default) also accepts cells containing only whitespace.
 
 ### `Group` — Repeat a block of nodes together
 
 ```python
-Group(Row(...), EmptyRow(...), repeat="+")
+Group(children=[Row(...), EmptyRow(...)], repeat="+")
 ```
 
 Groups multiple nodes and repeats them as a unit. Useful for tables with repeating section separators.
+
+### `AltNode` — Alternatives (OR semantics)
+
+```python
+Row(pattern=["Header A", Types.INT]) | Row(pattern=["Header B", Types.INT])
+```
+
+Created via the `|` operator. Matches whichever alternative fits.
 
 ### `repeat` spec
 
@@ -136,85 +154,45 @@ Groups multiple nodes and repeats them as a unit. Useful for tables with repeati
 | `(2, 5)` | Between 2 and 5 times |
 | `(3, None)` | 3 or more |
 
-> [!WARNING]
-> All `repeat` specs are **greedy and non-backtracking**. If a `"+"` or `"*"`
-> node is immediately followed by another node whose pattern overlaps, the
-> greedy node may consume rows that the next node needs.
->
-> **Safe:** header row uses a literal string (`"Dept"`), data rows use a type
-> (`Types.STR`) — patterns don't overlap ✓  
-> **Unsafe:** `Row([Types.STR], repeat="+")` followed by `Row([Types.STR])` —
-> the trailing node may never match ✗
-
 ---
 
 ## Working with Results
 
-### `MatchOutput`
+### Return type
+
+`match_template()` returns `list[list[list[BlockMatch]]]`:
+
+| Dimension | Meaning |
+|-----------|---------|
+| `[i]` | i-th scanned sheet |
+| `[i][j]` | j-th template's matches on sheet i |
+| `[i][j][k]` | k-th block match |
+
+### `BlockMatch`
 
 ```python
-output.results      # list[MatchResult] — successful matches
-output.near_misses  # list[NearMissHint] — partial matches (debug only)
+block_match.start       # (row, col) — 0-based top-left corner
+block_match.end         # (row, col) — 0-based bottom-right corner
+block_match.rows        # list[RowMatch] — all matched rows
+block_match.block_id    # the block_id you gave the Block
 ```
 
-### `MatchResult`
+### `RowMatch`
 
 ```python
-result.block_id         # the block_id you gave the Block
-result.sheet            # sheet name where the match was found
-result.anchor           # (row, col) — 0-based top-left corner
-result.bounding_box     # (r1, c1, r2, c2) — inclusive bounding box
-result.matched_nodes    # list[NodeResult] — all matched nodes
-result.data_nodes()     # list[NodeResult] — excludes EmptyRow / EmptyCol
-result.to_dict()        # convert to plain dict (JSON-serialisable)
+row.row                 # absolute 0-based row index in the sheet
+row.cells               # list[CellMatch]
+row.node_id             # the node_id you gave the Row
 ```
 
-### `NodeResult`
-
-Each matched `Row` / `Col` / `EmptyRow` / `EmptyCol` produces one `NodeResult` per repetition:
+### `CellMatch`
 
 ```python
-node.node_type      # "Row" | "Col" | "EmptyRow" | "EmptyCol"
-node.node_id        # the node_id you gave the Row/Col
-node.repeat_index   # 0-based repetition index
-node.cells          # list of extracted cell values
-node.grid_row       # absolute 0-based row in the sheet
-node.grid_col       # absolute 0-based column in the sheet
+cell.row                # absolute 0-based row index
+cell.col                # absolute 0-based col index
+cell.value              # normalised string value
+cell.is_merged          # True if this cell was expanded from a merge range
 ```
-
-### `find_node` / `find_nodes` — Locate nodes by ID
-
-**Single node:**
-```python
-node = result.find_node("data", repeat_index=2)
-# → the 3rd repetition of "data" (0-based)
-
-print(node.grid_row, node.grid_col)   # exact sheet coordinates
-print(node.cells)                     # extracted values
-```
-
-**All repetitions at once:**
-```python
-rows = result.find_nodes("data")   # list[NodeResult], sorted by repeat_index
-for row in rows:
-    dept, name, salary = row.cells
-```
-
-> `find_nodes` is the natural choice for `repeat="+"` or `repeat="*"` nodes —
-> no need to know the count in advance.
-
-### `to_dict` — Named keys (list of dicts)
-
-Pass a `node_id` to use that node's cell values as dictionary keys
-(that node is excluded from the data rows):
-
-```python
-# header row has node_id="header", data rows have node_id="data"
-records = result.to_dict(header_node="header")
-# → [{"Dept": "IT", "Name": "Alice", "Salary": 50000}, ...]
-```
-
-Without `header_node`, returns a full structural dump of the `MatchResult`.
 
 ---
 
@@ -222,94 +200,46 @@ Without `header_node`, returns a full structural dump of the `MatchResult`.
 
 ```python
 MatchOptions(
-    return_mode             = "ALL",   # "ALL" | "FIRST"
-    near_miss_threshold     = None,    # float 0–1, or None to disable
-    search_range            = None,    # (r1, c1, r2, c2) 0-based, or None
-    consume_matched_regions = False,   # True = overlap prevention
+    return_mode = 0,    # 0 = scan all sheets; N > 0 = stop after N sheets with matches
 )
 ```
 
 | `return_mode` | Behaviour |
 |---------------|-----------|
-| `"ALL"` | Return every match found |
-| `"FIRST"` | Return only the first match, then stop scanning |
-
-### `search_range` and the `excel_range()` helper
-
-`search_range` uses 0-based coordinates. Use `excel_range()` to convert from
-familiar Excel notation:
-
-```python
-from mypkg.excel_extractor import MatchOptions, excel_range
-
-opts = MatchOptions(search_range=excel_range("A1:F50"))
-# equivalent to MatchOptions(search_range=(0, 0, 49, 5))
-```
+| `0` | Scan all sheets |
+| `N` (positive int) | Stop scanning after `N` sheets that contain at least one match |
 
 ---
 
 ## Advanced: Multi-Sheet Scanning
 
 ```python
-# Scan all sheets
-output = match_template("report.xlsx", template, sheet=None)
-# or equivalently
-output = match_template("report.xlsx", template, sheet="*")
+# Scan all sheets (default)
+results = match_template("report.xlsx", template, sheet=None)
 
-# Scan specific sheets
-output = match_template("report.xlsx", template, sheet=["Sheet1", "Sheet3"])
-
-# Each MatchResult carries the sheet name
-for result in output.results:
-    print(result.sheet, result.anchor)
+# Scan specific sheets by name or 0-based index
+results = match_template("report.xlsx", template, sheet=["Sheet1", "Sheet3"])
+results = match_template("report.xlsx", template, sheet=0)
 ```
 
 ---
 
-## Advanced: Multi-Template Sheet Composition
+## Advanced: Multi-Template Composition
 
-When multiple templates describe the same sheet, use `consume_matched_regions=True`
-to prevent smaller templates from matching inside regions already claimed by larger blocks.
+Pass a list of Block templates to scan for multiple patterns in one pass:
 
 ```python
-from mypkg.excel_extractor import MatchOptions
-
-header_block = Block(Row(["Report", "Date"]), block_id="header")
+header_block = Block(Row(pattern=["Report", "Date"]), block_id="header")
 data_block   = Block(
-    Row(["Dept", "Name", "Salary"]),
-    Row([Types.STR, Types.STR, Types.INT], repeat="+"),
+    Row(pattern=["Dept", "Name", "Salary"]),
+    Row(pattern=[Types.STR, Types.STR, Types.INT], repeat="+"),
     block_id="data_table",
 )
 
-opts = MatchOptions(consume_matched_regions=True)
-output = match_template("report.xlsx", [header_block, data_block], options=opts)
+results = match_template("report.xlsx", [header_block, data_block])
+# results[sheet_idx][0] → header_block matches
+# results[sheet_idx][1] → data_block matches
 ```
-
-Templates are automatically sorted by footprint (largest first) so the bigger
-block claims its region before smaller templates scan.
-
----
-
-## Advanced: Near-Miss Debugging
-
-```python
-opts = MatchOptions(near_miss_threshold=0.5)
-output = match_template("report.xlsx", template, options=opts)
-
-for hint in output.near_misses:
-    print(f"Almost matched at {hint.anchor}: {hint.matched_ratio:.0%} — failed at {hint.failed_at}")
-    if hint.expected:
-        print(f"  Expected: {hint.expected}, got: {hint.got}")
-```
-
-`NearMissHint` attributes:
-
-| Attribute | Description |
-|-----------|-------------|
-| `matched_ratio` | Fraction of top-level children that matched (0.0–1.0) |
-| `failed_at` | Human-readable description of the first failure point |
-| `expected` | Description of what the template expected at the failure |
-| `got` | The actual cell value seen at the failure point |
 
 ---
 
@@ -317,45 +247,30 @@ for hint in output.near_misses:
 
 ```python
 from mypkg.excel_extractor import (
-    match_template, Block, Row, EmptyRow, Group, Types, MatchOptions, excel_range,
+    match_template, Block, Row, EmptyRow, Group, Types, MatchOptions,
 )
 
 # Template: grouped payroll table with merged dept cells, groups separated by blank rows
 template = Block(
-    Row(["Dept", "Name", "Salary"], node_id="header"),
-    Group(
-        Row([Types.MERGED, Types.STR, Types.INT], repeat="+", node_id="data"),
+    Row(pattern=["Dept", "Name", "Salary"], node_id="header", min_similarity=0.85),
+    Group(children=[
+        Row(pattern=[Types.MERGED, Types.STR, Types.INT], repeat="+", node_id="data"),
         EmptyRow(repeat="?"),
-        repeat="+",
-    ),
+    ], repeat="+"),
     block_id="payroll",
 )
 
-output = match_template(
+results = match_template(
     "payroll.xlsx",
     template,
-    sheet=None,                                          # scan all sheets
-    options=MatchOptions(
-        search_range=excel_range("A1:F100"),             # limit scan area
-        near_miss_threshold=0.5,                         # enable debug hints
-    ),
+    sheet=None,                          # scan all sheets
 )
 
-for result in output.results:
-    print(f"Found in sheet {result.sheet!r} at {result.anchor}")
-
-    # DataFrame with proper column names from the header row
-    df = result.to_dataframe(header_node="header")
-    print(df)
-
-    # Iterate every data row without knowing the count upfront
-    for node in result.find_nodes("data"):
-        dept, name, salary = node.cells
-        print(f"  Row {node.grid_row}: {dept} | {name} | {salary}")
-
-# Debug: inspect near misses
-for hint in output.near_misses:
-    print(f"Near miss at {hint.anchor} ({hint.matched_ratio:.0%}) → {hint.failed_at}")
-    if hint.expected:
-        print(f"  Expected {hint.expected}, got {hint.got}")
+for sheet_results in results:
+    for block_match in sheet_results[0]:   # first (only) template
+        print(f"Found at {block_match.start} → {block_match.end}")
+        for row in block_match.rows:
+            if row.node_id == "data":
+                dept, name, salary = [c.value for c in row.cells]
+                print(f"  Row {row.row}: {dept} | {name} | {salary}")
 ```

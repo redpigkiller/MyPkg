@@ -1,6 +1,6 @@
 """Template AST node definitions.
 
-Users build a Block by composing Row/Col/EmptyRow/EmptyCol/Group nodes.
+Users build a Block by composing Row/EmptyRow/Group nodes.
 These are pure data-holder classes; no matching logic lives here.
 
 Repeat spec
@@ -152,7 +152,7 @@ class EmptyRow(TemplateNode):
     
 @dataclass
 class Group(TemplateNode):
-    """Groups multiple Row/Col/EmptyRow/EmptyCol nodes for collective repetition."""
+    """Groups multiple Row/EmptyRow nodes for collective repetition."""
     children: list[TemplateNode] = field(default_factory=list)
 
     def __post_init__(self):

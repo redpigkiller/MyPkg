@@ -1,12 +1,13 @@
-"""Normalization layer: openpyxl → InternalGrid.
+"""Normalization layer: Excel workbook → InternalGrid.
 
 Responsibilities
 ----------------
-1. Read the workbook via openpyxl (NOT pandas — pandas cannot detect merge cells).
+1. Read the workbook via openpyxl (.xlsx/.xlsm) or xlrd (.xls).
+   (NOT pandas — pandas cannot detect merge cells.)
 2. Build a merge map so that every cell in a merged region carries the master
    cell's value and is flagged `is_merged=True`.
 3. Normalise dates/times to ISO-8601 strings (YYYY-MM-DD / HH:MM).
-4. Convert openpyxl's 1-based coordinates to 0-based for the rest of the engine.
+4. Convert coordinates to 0-based for the rest of the engine.
 """
 
 from __future__ import annotations
@@ -23,9 +24,9 @@ from openpyxl import Workbook
 class InternalCell:
     """A single normalised cell.
 
-    value          : str representation of the cell value, or None if empty.
+    value          : str representation of the cell value ("" if empty).
                      Dates are already converted to 'YYYY-MM-DD'.
-    original_value : the raw value returned by openpyxl before normalisation.
+    original_value : the raw value from the workbook before normalisation.
     is_merged      : True if this cell was expanded from a merge range.
     """
     value: str
@@ -34,12 +35,21 @@ class InternalCell:
 
 
 class InternalGrid:
-    """A 2-D array of InternalCell objects with 0-based coordinate access."""
+    """A 2-D rectangular array of InternalCell objects with 0-based coordinate access."""
 
     def __init__(self, cells: list[list[InternalCell]]):
         self._cells = cells
         self.num_rows = len(cells)
-        self.num_cols = max((len(row) for row in cells), default=0)
+        if self.num_rows == 0:
+            self.num_cols = 0
+            return
+        col_widths = set(len(row) for row in cells)
+        if len(col_widths) != 1:
+            raise ValueError(
+                f"InternalGrid requires all rows to have equal length, "
+                f"got widths: {sorted(col_widths)}"
+            )
+        self.num_cols = col_widths.pop()
 
     def get_cell(self, row: int, col: int) -> InternalCell:
         """Return the cell at (row, col), or None if out of bounds."""
@@ -66,6 +76,18 @@ class InternalGrid:
             return row[col_idx]
 
         return self._cells[index]
+
+    def transpose(self) -> "InternalGrid":
+        """Return a new InternalGrid with rows and columns swapped."""
+        if self.num_rows == 0 or self.num_cols == 0:
+            return InternalGrid([])
+        transposed: list[list[InternalCell]] = []
+        for c in range(self.num_cols):
+            row = []
+            for r in range(self.num_rows):
+                row.append(self._cells[r][c])
+            transposed.append(row)
+        return InternalGrid(transposed)
 
 # ---------------------------------------------------------------------------
 # Loader

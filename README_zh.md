@@ -109,27 +109,24 @@ tracker.summary()                    # 自動印出失敗報告
 
 ### [Excel Extractor](docs/excel_extractor/excel_extractor_zh.md) — 以樣板為基礎的資料擷取
 
-描述資料的「形狀」，引擎自動找出它在工作表上的位置。支援合併儲存格、重複列、多樣板組合及近似比對除錯。
+描述資料的「形狀」，引擎自動找出它在工作表上的位置。支援 `.xlsx`/`.xlsm` (openpyxl) 與 `.xls` (xlrd)、合併儲存格、重複列、模糊標題比對及多樣板組合。
 
 ```python
 from mypkg.excel_extractor import match_template, Block, Row, Types
 
 template = Block(
-    Row(["部門", "姓名", "月薪"]),
-    Row([Types.STR, Types.STR, Types.INT], repeat="+", node_id="data"),
+    Row(pattern=["部門", "姓名", "月薪"], min_similarity=0.85),
+    Row(pattern=[Types.STR, Types.STR, Types.INT], repeat="+", node_id="data"),
     block_id="salary_table",
 )
 
-output = match_template("report.xlsx", template)
-result = output.results[0]
+# 回傳 list[list[list[BlockMatch]]] — [每張工作表][每個樣板][每個比對結果]
+results = match_template("report.xlsx", template)
 
-# 獲得每個符合資料列的絕對座標
-for node in result.data_nodes():
-    print(node.grid_row, node.cells)  # → absolute row + [dept, name, salary]
-
-# 透過 id 尋找特定的列，並可於日後寫回
-third = result.find_node("data", repeat_index=2)
-print(third.grid_row, third.grid_col)  # → sheet 中的確切 (row, col) 座標
+for block_match in results[0][0]:            # 第一張工作表、第一個樣板
+    for row in block_match.rows:
+        if row.node_id == "data":
+            print(row.row, [c.value for c in row.cells])
 ```
 
 

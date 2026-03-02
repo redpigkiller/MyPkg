@@ -102,27 +102,24 @@ tracker.summary()                    # Auto-prints failure report
 
 ### [Excel Extractor](docs/excel_extractor/excel_extractor.md) — Template-Based Data Extraction
 
-Describe the *shape* of your data; the engine finds it wherever it lives on the sheet. Supports merged cells, repeating rows, multi-template composition, and near-miss debugging.
+Describe the *shape* of your data; the engine finds it wherever it lives on the sheet. Supports `.xlsx`/`.xlsm` (openpyxl) and `.xls` (xlrd), merged cells, repeating rows, fuzzy header matching, and multi-template composition.
 
 ```python
 from mypkg.excel_extractor import match_template, Block, Row, Types
 
 template = Block(
-    Row(["部門", "姓名", "月薪"], normalize=True, fuzzy=0.9),
-    Row([Types.STR, Types.STR, Types.INT], repeat="+", node_id="data"),
+    Row(pattern=["部門", "姓名", "月薪"], min_similarity=0.85),
+    Row(pattern=[Types.STR, Types.STR, Types.INT], repeat="+", node_id="data"),
     block_id="salary_table",
 )
 
-output = match_template("report.xlsx", template)
-result = output.results[0]
+# Returns list[list[list[BlockMatch]]] — [per-sheet][per-template][per-match]
+results = match_template("report.xlsx", template)
 
-# Exact sheet coordinates for every matched row
-for node in result.data_nodes():
-    print(node.grid_row, node.cells)  # → absolute row + [dept, name, salary]
-
-# Find a specific row by id and write back later
-third = result.find_node("data", repeat_index=2)
-print(third.grid_row, third.grid_col)  # → exact (row, col) in the sheet
+for block_match in results[0][0]:            # first sheet, first template
+    for row in block_match.rows:
+        if row.node_id == "data":
+            print(row.row, [c.value for c in row.cells])
 ```
 
 

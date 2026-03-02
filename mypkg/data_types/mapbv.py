@@ -212,7 +212,6 @@ class MapBV(_BVBase):
         value: int = 0,
         tags: dict | None = None,
     ) -> None:
-        
         if parent is None or isinstance(parent, str):
             # New instance
             if low != 0:
@@ -312,7 +311,7 @@ class MapBV(_BVBase):
         return None
     
     @property
-    def type(self) -> str:
+    def typ(self) -> str:
         return self._type
     
     # -- value access -------------------------------------------------------
@@ -321,14 +320,14 @@ class MapBV(_BVBase):
     def value(self) -> int:
         """Read value.  If linked, concatenate children (MSB-first)."""
         if self._parent is not None:
-            mask = (1 << self._width) - 1
-            return (self._parent.value >> self._low) & mask
+            return (self._parent.value >> self._low) & self._mask
         
         if self._link_bv_list:
             result = 0
             for child in self._link_bv_list:
                 result = (result << child.width) | child.value
             return result
+        
         return self._raw_value
 
     @value.setter
@@ -338,30 +337,28 @@ class MapBV(_BVBase):
         Writing to a constant raises a warning and is ignored.
         """
         if self._parent is not None:
-            mask = (1 << self._width) - 1
-            val &= mask
-            clear = ~(mask << self._low) & ((1 << self._parent.width) - 1)
+            val &= self._mask
+            clear = ~(self._mask << self._low) & ((1 << self._parent.width) - 1)
             self._parent.value = (self._parent.value & clear) | (val << self._low)
-            return
-    
-        if self._type == "CONST":
+        
+        elif self._type == "CONST":
             warnings.warn(
                 f"Attempted to write 0x{val:X} to constant MapBV "
                 f"(width={self._width}). Write ignored.",
                 UserWarning,
                 stacklevel=2,
             )
-            return
         
-        val &= self._mask
-        if self._link_bv_list:
-            offset = 0
-            for child in reversed(self._link_bv_list):
-                child_mask = (1 << child.width) - 1
-                child.value = (val >> offset) & child_mask
-                offset += child.width
         else:
-            self._raw_value = val
+            val &= self._mask
+            if self._link_bv_list:
+                offset = 0
+                for child in reversed(self._link_bv_list):
+                    child_mask = (1 << child.width) - 1
+                    child.value = (val >> offset) & child_mask
+                    offset += child.width
+            else:
+                self._raw_value = val
 
     # -- linking ------------------------------------------------------------
     def _collect_linked(self, visited: set) -> None:

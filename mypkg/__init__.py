@@ -1,6 +1,6 @@
 """MyPkg — A collection of utilities for IC design & verification."""
 
-from mypkg.data_types.mapbv import MapBV, MapBVSlice, MapBVExpr, StructSegment
+from mypkg.data_types.mapbv import MapBV, MapBVExpr, StructSegment
 from mypkg.scheduler import Scheduler, Job, CmdJob
 
 try:
@@ -14,8 +14,9 @@ except ImportError:
 try:
     from mypkg.excel_extractor import (
         match_template,
-        Block, Row, Col, EmptyRow, EmptyCol, Group,
-        Types, MatchOptions, MatchTolerance, MatchResult, NodeResult,
+        Block, Row, EmptyRow, Group,
+        Types, CellCondition,
+        MatchOptions, BlockMatch, RowMatch, CellMatch,
     )
     HAS_EXCEL = True
 except ImportError:
@@ -37,15 +38,16 @@ except ImportError:
 
 __all__ = [
     # data types
-    "MapBV", "MapBVSlice", "MapBVExpr", "StructSegment",
+    "MapBV", "MapBVExpr", "StructSegment",
     "NumBV",
     "NumBVArray",
     # scheduler
     "Scheduler", "Job", "CmdJob",
     # excel
     "match_template",
-    "Block", "Row", "Col", "EmptyRow", "EmptyCol", "Group",
-    "Types", "MatchOptions", "MatchTolerance", "MatchResult", "NodeResult",
+    "Block", "Row", "EmptyRow", "Group",
+    "Types", "CellCondition",
+    "MatchOptions", "BlockMatch", "RowMatch", "CellMatch",
     # cfg / fsm / mcu
     "CFG", "BasicBlock", "NaturalLoop",
     "FSMGraph",

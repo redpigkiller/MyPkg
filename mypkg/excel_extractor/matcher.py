@@ -67,6 +67,7 @@ class CompiledTemplate:
     cond_id_map_rv: dict[CompiledCellCondition, CompiledCellConditionId]
     width: int
     block_id: str | None
+    orientation: str
 
 
 class TemplateMatcher:
@@ -86,6 +87,7 @@ class TemplateMatcher:
                     cond_id_map_rv=cond_id_map_rv,
                     width=template.width,
                     block_id=template.block_id,
+                    orientation=template.orientation,
                 )
             )
             
@@ -94,23 +96,28 @@ class TemplateMatcher:
     # ------------------------------------------------------------------
 
     def scan_for_blocks(self, grid: InternalGrid) -> list[list[BlockMatch]]:
-        # TODO Support horizaontal orientation
         match_results = []
         for compiled_template in self.compiled_templates:
-            cid_grid = self._match_grid(grid, compiled_template.cond_id_map_rv)
+            is_horizontal = compiled_template.orientation == "horizontal"
+            work_grid = grid.transpose() if is_horizontal else grid
+
+            cid_grid = self._match_grid(work_grid, compiled_template.cond_id_map_rv)
             width = compiled_template.width
 
             # Search for matches
             match_result: list[BlockMatch] = []
-            for i in range(grid.num_rows):
-                for j in range(grid.num_cols - width + 1):
+            for i in range(work_grid.num_rows):
+                for j in range(work_grid.num_cols - width + 1):
                     sub_cid_grid = [row[j:j+width] for row in cid_grid[i:]]
 
-                    is_match, match_group = self._match_template(sub_cid_grid, compiled_template)
+                    is_match, matched_rows = self._match_template(sub_cid_grid, compiled_template)
                     if is_match:
-                        match_result.append(
-                            self._build_match_result(grid, (i, j), match_group, compiled_template)
+                        block_match = self._build_match_result(
+                            work_grid, (i, j), matched_rows, compiled_template
                         )
+                        if is_horizontal:
+                            block_match = self._swap_coordinates(block_match)
+                        match_result.append(block_match)
             match_results.append(match_result)
         return match_results
 
@@ -149,20 +156,24 @@ class TemplateMatcher:
             return rule.pattern == cell_value
         return bool(rule.pattern.fullmatch(cell_value))
 
-    def _match_template(self, cid_grid: list[list[set[CompiledCellConditionId]]], compiled_template: CompiledTemplate) -> tuple[bool, str]:
-        compile_rule_id_sequence: list[CompiledRuleId] = []
-        for cid_row in cid_grid:
+    def _match_template(
+        self,
+        cid_grid: list[list[set[CompiledCellConditionId]]],
+        compiled_template: CompiledTemplate,
+    ) -> tuple[bool, list[tuple[int, CompiledRuleId]]]:
+        row_symbols: list[tuple[int, CompiledRuleId]] = []
+        for idx, cid_row in enumerate(cid_grid):
             symbol = self._match_row(cid_row, compiled_template)
             if symbol is not None:
-                compile_rule_id_sequence.append(symbol)
-        joined = "".join(rid.symbol for rid in compile_rule_id_sequence)
+                row_symbols.append((idx, symbol))
+        joined = "".join(rid.symbol for _, rid in row_symbols)
 
         # TODO Maybe use other method to deal with group, '*', '+', ... operation
-        # TODO Maybe use Huffman coding to encode data instead of unicode
         m = re.match(compiled_template.regex, joined)
         if m:
-            return True, m.group(0)
-        return False, ""
+            matched_count = len(m.group(0))
+            return True, row_symbols[:matched_count]
+        return False, []
 
     def _match_row(self, cid_row: list[set[CompiledCellConditionId]], compiled_template: CompiledTemplate) -> CompiledRuleId | None:
         for compile_rule_id, compiled_rule in compiled_template.rule_id_map.items():
@@ -181,36 +192,53 @@ class TemplateMatcher:
         self,
         grid: InternalGrid,
         start_position: tuple[int, int],
-        match_str: str,
+        matched_rows: list[tuple[int, CompiledRuleId]],
         compiled_template: CompiledTemplate,
     ) -> BlockMatch:
         start_row, start_col = start_position
 
         row_matches = []
-        for i, symbol_char in enumerate(match_str):
-            rule_id = CompiledRuleId(ord(symbol_char) - 0xF0000)
+        for rel_row, rule_id in matched_rows:
             compiled_rule = compiled_template.rule_id_map[rule_id]
 
             cell_matches = []
             for j in range(len(compiled_rule.rules)):
-                cell = grid.get_cell(i, j)
+                cell = grid.get_cell(start_row + rel_row, start_col + j)
                 cell_matches.append(CellMatch(
-                    row=start_row + i,
-                    col=start_col+j,
+                    row=start_row + rel_row,
+                    col=start_col + j,
                     value=cell.value,
-                    is_merged=cell.is_merged
+                    is_merged=cell.is_merged,
                 ))
             row_matches.append(RowMatch(
-                row=start_row + i,
+                row=start_row + rel_row,
                 cells=cell_matches,
                 node_id=compiled_rule.node_id,
             ))
 
+        last_rel_row = matched_rows[-1][0] if matched_rows else 0
         return BlockMatch(
             start=(start_row, start_col),
-            end=(start_row + len(match_str) - 1, start_col + compiled_template.width - 1),
+            end=(start_row + last_rel_row, start_col + compiled_template.width - 1),
             rows=row_matches,
             block_id=compiled_template.block_id,
+        )
+
+    @staticmethod
+    def _swap_coordinates(block_match: BlockMatch) -> BlockMatch:
+        """Swap row/col in all coordinates (used for horizontal → original mapping)."""
+        new_rows = []
+        for row in block_match.rows:
+            new_cells = [
+                CellMatch(row=c.col, col=c.row, value=c.value, is_merged=c.is_merged)
+                for c in row.cells
+            ]
+            new_rows.append(RowMatch(row=row.row, cells=new_cells, node_id=row.node_id))
+        return BlockMatch(
+            start=(block_match.start[1], block_match.start[0]),
+            end=(block_match.end[1], block_match.end[0]),
+            rows=new_rows,
+            block_id=block_match.block_id,
         )
     
     # ------------------------------------------------------------------
@@ -397,7 +425,7 @@ def match_template(
 
         match_results.append(output)
 
-        if matched_cnt >= options.return_mode:
+        if options.return_mode > 0 and matched_cnt >= options.return_mode:
             break
 
     # Clean up
