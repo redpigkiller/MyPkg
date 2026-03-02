@@ -8,15 +8,16 @@ Describe registers, SRAM mappings, and logic operations with intuitive Python ob
 ## Quick Start
 
 ```python
+import mypkg.data_types.mapbv as mbv
 from mypkg import MapBV
 
-# Declare registers
-reg0 = MapBV("REG0", 16, tags={"type": "RW", "addr": 0x100})
-reg1 = MapBV("REG1", 16, tags={"type": "RO"})
-padding = MapBV(0, 2)               # 2-bit constant
+# Declare registers using factory functions
+reg0 = mbv.var("REG0", 16, tags={"type": "RW", "addr": 0x100})
+reg1 = mbv.var("REG1", 16, tags={"type": "RO"})
+padding = mbv.const(0, 2)               # 2-bit constant
 
 # Define SRAM word: {REG0[3:0], padding, REG1[1:0]}
-sram = MapBV("SRAM_00", 8)
+sram = mbv.var("SRAM_00", 8)
 sram.link(reg0[3:0], padding, reg1[1:0])
 
 # Write regs → read SRAM
@@ -35,11 +36,14 @@ print(reg0.to_hex(), reg1.to_hex())  # → 0x000F 0x0003
 ### 1. Declaration
 
 ```python
-# Named variable with metadata
-reg = MapBV("REG0", 16, tags={"type": "RW", "addr": 0x100})
+import mypkg.data_types.mapbv as mbv
 
-# Constant (immutable — writes emit a warning)
-padding = MapBV(0, 4)
+# Named variable with metadata
+reg = mbv.var("REG0", 16, tags={"type": "RW", "addr": 0x100})
+
+# Constant (immutable — writes emit a warning; value auto-masked to width)
+padding = mbv.const(0, 4)
+mask    = mbv.const(0xFF, 4)   # → value is 0xF (masked to 4 bits)
 ```
 
 ### 2. Linking & Bidirectional Sync
@@ -47,7 +51,7 @@ padding = MapBV(0, 4)
 Link small signals into a larger word. Changes propagate **both ways** automatically.
 
 ```python
-sram = MapBV("SRAM", 8)
+sram = mbv.var("SRAM", 8)
 sram.link(reg0[3:0], padding, reg1[1:0])   # MSB → LSB order
 
 # Read: concatenates children's current values
@@ -70,12 +74,15 @@ reg.value = 0xABCD
 reg[7:0].value          # → 0xCD
 reg[15:8].value         # → 0xAB
 reg[7:4].value = 0xF    # Set bits 7~4 only
+reg[3]                  # → 1-bit slice
 ```
 
-Slices can also be **link targets**:
+To compose a sub-region from fields, create an explicit VAR:
 
 ```python
-reg[7:0].link(field_a, field_b)  # Restructure partial region
+lower = var("REG_LOWER", 8)
+lower.link(field_a, field_b)
+reg.link(reg[15:8], lower)  # upper half from slice, lower half from lower
 ```
 
 ### 4. Logic & Shift Operators
@@ -88,7 +95,7 @@ result = reg0 << 4              # Left shift
 result = reg0[7:0] ^ reg1[7:0]  # Slices support operators too
 
 # Chainable
-expr = (reg0 & 0x0F) | (reg1 ^ MapBV(0xFF, 16))
+expr = (reg0 & 0x0F) | (reg1 ^ mbv.const(0xFF, 16))
 print(expr.value)
 ```
 
@@ -112,8 +119,8 @@ print(sram.to_hex())            # → 0x52  (still the original)
 When same-name registers exist under different conditions (e.g., "red" vs. "green"), use `MapBV.key()` to create tag-specific context keys:
 
 ```python
-reg0_red   = MapBV("REG0", 16, tags={"color": "red"})
-reg0_green = MapBV("REG0", 16, tags={"color": "green"})
+reg0_red   = mbv.var("REG0", 16, tags={"color": "red"})
+reg0_green = mbv.var("REG0", 16, tags={"color": "green"})
 
 sram_red.eval({
     MapBV.key("REG0", {"color": "red"}): 0x1,
@@ -131,7 +138,7 @@ for seg in sram.structure:
 
 # Output:
 # REG0 (3, 0) tags={'type': 'RW', ...}
-# CONST None   tags=None
+# Constant None   tags=None
 # REG1 (1, 0) tags={'type': 'RO'}
 ```
 
@@ -152,8 +159,19 @@ backup = reg.copy("REG0_backup")
 sram.unlink()
 len(reg)            # → 16  (bit width)
 int(reg)            # → integer value
-reg == 0x42         # → True/False
+reg.value_eq(0x42)  # → True/False  (use instead of ==)
 ```
+
+### 9. Error Handling & Validation
+
+`MapBV` provides detailed error messages to prevent invalid states and operations:
+
+- **Invalid Names**: `ValueError("Invalid name '1bad': must be a valid Python identifier...")`
+- **Out of Bounds Values**: `ValueError("Value 0x100 out of bounds for 8-bit MapBV (max 0xFF)")`
+- **Invalid Width/Slice Range**: `ValueError("Invalid range [2:5]: width must be > 0, got -2")`
+- **Slice Out of Range**: `IndexError("Slice [8:0] out of bounds for REG[7:0]")`
+- **Operand Exceeds Width**: `ValueError("Operand 0x100 exceeds MapBV width 8 (max 0xFF)")`
+- **Slicing on Custom Tags**: `ValueError("Slices cannot have custom tags; they inherit from their parent")`
 
 ---
 
@@ -161,26 +179,41 @@ reg == 0x42         # → True/False
 
 | Class | Description |
 |:------|:------------|
-| `MapBV(name_or_value, width, tags=None)` | Main BitVector — named variable or constant |
-| `MapBVSlice` | Proxy from `bv[high:low]`, supports read/write/link/operators |
+| `MapBV(parent, high, low)` | Core BitVector node — named variable, constant, or slice |
 | `MapBVExpr` | Expression tree from logic/shift operators |
 | `StructSegment` | Frozen dataclass with `.bv` and `.slice_range` |
+
+### Factory Functions (Preferred)
+
+| Function | Description |
+|:---------|:------------|
+| `const(value, width)` | Create an immutable constant (value auto-masked) |
+| `var(name, width, tags=None)` | Create a named variable |
+
+```python
+import mypkg.data_types.mapbv as mbv
+# or: from mypkg import const, var
+
+padding = mbv.const(0, 2)
+reg     = mbv.var("REG0", 16, tags={"type": "RW"})
+```
 
 ### `MapBV` Properties & Methods
 
 | Member | Type | Description |
 |:-------|:-----|:------------|
-| `.name` | `str` | Name of the MapBV (`"CONST"` for constants) |
+| `.name` | `str` | Name (`"Constant"` for constants) |
 | `.width` | `int` | Bit width |
 | `.value` | `int` | Current value (read/write, bidirectional if linked) |
-| `.is_const` | `bool` | Whether this is a constant |
-| `.tags` | `dict\|None` | User metadata (`None` for constants) |
+| `.typ` | `str` | Node type: `"CONST"`, `"VAR"`, or `"SLICE"` |
+| `.tags` | `dict\|None` | User metadata (`None` for constants and slices) |
+| `.value_eq(other)` | method | Value comparison (use instead of `==`) |
 | `.link(*parts)` | method | Define as concatenation of parts (MSB→LSB) |
 | `.unlink()` | method | Remove link, snapshot value |
 | `.eval(ctx)` | method | Symbolic evaluation with context dict |
 | `.structure` | `list[StructSegment]` | Linked composition (empty if unlinked) |
 | `.copy(name)` | method | Deep-copy to independent MapBV |
-| `.snapshot(name)` | method | Alias for `.copy()` |
 | `.to_hex()` | method | Zero-padded hex string |
 | `.to_bin()` | method | Zero-padded binary string |
 | `.concat(*parts)` | classmethod | Create linked MapBV from parts |
+| `.key(name, tags)` | staticmethod | Create hashable tag-aware eval context key |

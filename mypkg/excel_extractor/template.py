@@ -31,21 +31,21 @@ def _parse_repeat(repeat: RepeatSpec) -> tuple[int, int | None]:
     """
     if isinstance(repeat, int):
         if repeat < 0:
-            raise ValueError(f"repeat must be non-negative, got {repeat}")
+            raise ValueError(f"Repeat must be non-negative, got {repeat}")
         return (repeat, repeat)
     if isinstance(repeat, str):
         table = {"?": (0, 1), "+": (1, None), "*": (0, None)}
         if repeat not in table:
-            raise ValueError(f"repeat string must be '?', '+' or '*', got {repeat!r}")
+            raise ValueError(f"Repeat string must be '?', '+' or '*', got {repeat!r}")
         return table[repeat]
     if isinstance(repeat, tuple):
         if len(repeat) != 2:
-            raise ValueError("repeat tuple must be (min, max) where max may be None")
+            raise ValueError("Repeat tuple must be (min, max) where max may be None")
         lo, hi = repeat
         if not isinstance(lo, int) or lo < 0:
-            raise ValueError(f"repeat min must be a non-negative int, got {lo!r}")
+            raise ValueError(f"Repeat min must be a non-negative int, got {lo!r}")
         if hi is not None and (not isinstance(hi, int) or hi < lo):
-            raise ValueError(f"repeat max must be None or an int >= min, got {hi!r}")
+            raise ValueError(f"Repeat max must be None or an int >= min, got {hi!r}")
         return (lo, hi)
     raise TypeError(f"Unsupported repeat spec: {repeat!r}")
 

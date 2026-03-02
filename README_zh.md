@@ -36,11 +36,13 @@ pytest -q                 # 執行測試
 位元映射、暫存器結構、雙向同步、邏輯運算、符號化求值。
 
 ```python
+import mypkg.data_types.mapbv as mbv
 from mypkg import MapBV
-reg = MapBV("REG0", 16, tags={"type": "RW", "addr": 0x100})
-sram = MapBV("SRAM", 8)
-padding = MapBV(0, 2)
-field = MapBV("FIELD", 4)
+
+reg = mbv.var("REG0", 16, tags={"type": "RW", "addr": 0x100})
+sram = mbv.var("SRAM", 8)
+padding = mbv.const(0, 2)
+field = mbv.var("FIELD", 4)
 
 sram.link(reg[3:0], padding, field[1:0])
 

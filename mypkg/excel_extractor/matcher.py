@@ -298,7 +298,7 @@ class TemplateMatcher:
         if key not in self._seen:
             num_rule = len(self._seen)
             if num_rule > 0xFFFF:
-                raise RuntimeError("Too many unique rules (>65534), this is likely a bug")
+                raise RuntimeError("Too many unique rules (>65534), this is likely a bug.")
             self._seen[key] = CompiledRuleId(num_rule)
             self._rule_id_map[CompiledRuleId(num_rule)] = key
         return self._seen[key].symbol
@@ -379,7 +379,7 @@ def match_template(
         all_sheet_names = wb_openpyxl.sheetnames
 
     if (wb_xlrd is None and wb_openpyxl is None) or not all_sheet_names:
-        raise ValueError(f"Can not read {path_str}")
+        raise ValueError(f"Cannot read the specified Excel file: {path_str}")
 
     if sheet is None:
         sheets_to_scan = all_sheet_names
@@ -392,12 +392,12 @@ def match_template(
             ]
         except IndexError as e:
             raise ValueError(
-                f"Sheet index should less than {len(all_sheet_names)}."
+                f"Sheet index out of range. It should be less than {len(all_sheet_names)}."
             ) from e
 
         not_found_sheet = [s for s in sheets_to_scan if s not in all_sheet_names]
         if not_found_sheet:
-            raise ValueError(f"Sheet {', '.join(not_found_sheet)} not found.")
+            raise ValueError(f"Sheet(s) not found: {', '.join(not_found_sheet)}")
 
     match_results: list = []
     matched_cnt = 0
@@ -410,7 +410,7 @@ def match_template(
         elif wb_openpyxl is not None:
             grid = _load_xlsx_from_wb(wb_openpyxl, sheet_name)
         else:
-            raise ValueError("Unexpected error: None of sheet is loaded.")
+            raise ValueError("Unexpected error: No sheet was loaded.")
 
         # Start matching
         output = template_matcher.scan_for_blocks(grid)

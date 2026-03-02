@@ -3,9 +3,12 @@ MapBitVector (MapBV) — A lightweight BitVector library for IC design & verific
 
 Classes:
     MapBV            — The main BitVector node (named variable or constant).
-    MapBVSlice       — A lightweight proxy returned by MapBV[high:low].
     MapBVExpr        — A logic expression node produced by &, |, ^, ~ operators.
     StructSegment    — A data object returned by MapBV.structure for introspection.
+
+Factory functions (preferred user-facing API):
+    const(value, width)         — Create a constant MapBV.
+    var(name, width, tags=None) — Create a named variable MapBV.
 """
 
 from __future__ import annotations
@@ -34,7 +37,7 @@ class StructSegment:
 
 
 # ---------------------------------------------------------------------------
-# _LogicOpsMixin  — shared logic for MapBV, MapBVSlice, MapBVExpr
+# _BVBase  — shared logic for MapBV, MapBVExpr
 # ---------------------------------------------------------------------------
 
 class _BVBase(ABC):
@@ -93,8 +96,9 @@ class _BVBase(ABC):
 
     def __and__(self, other: MapBV | MapBVExpr | int) -> "MapBVExpr":
         if isinstance(other, int) and other >= (1 << self.width):
+            max_val = (1 << self.width) - 1
             raise ValueError(
-                f"Operand 0x{other:X} exceeds MapBV width {self.width}"
+                f"Operand 0x{other:X} exceeds MapBV width {self.width} (max 0x{max_val:X})"
             )
         w = self.width if isinstance(other, int) else max(self.width, other.width)
         return MapBVExpr("&", [self, other], w)
@@ -215,18 +219,19 @@ class MapBV(_BVBase):
         if parent is None or isinstance(parent, str):
             # New instance
             if low != 0:
-                raise ValueError()
+                raise ValueError(f"Standalone MapBV must have low=0, got low={low}")
             
             # 1. width
             self._width = high - low + 1
             if self._width <= 0:
-                raise ValueError(f"Width must be > 0, got {self._width}")
+                raise ValueError(f"Invalid range [{high}:{low}]: width must be > 0, got {self._width}")
             self._low = low
             self._high = high
 
             # 2. raw_value
             if not 0 <= value < (1 << self._width):
-                raise ValueError(f"Invalid value: {value}")
+                max_val = (1 << self._width) - 1
+                raise ValueError(f"Value 0x{value:X} out of bounds for {self._width}-bit MapBV (max 0x{max_val:X})")
             self._raw_value = value
 
             # 3. name & tags
@@ -238,7 +243,7 @@ class MapBV(_BVBase):
 
             else:
                 if not parent.isidentifier():
-                    raise ValueError(f"Invalid name: {parent}")
+                    raise ValueError(f"Invalid name '{parent}': must be a valid Python identifier (e.g., 'REG0', 'sig_out')")
                 self._name = parent
                 self._parent = None
                 self._type = "VAR"
@@ -248,13 +253,14 @@ class MapBV(_BVBase):
             # 1. width
             self._width = high - low + 1
             if not (parent.low <= low <= high <= parent.high):
-                raise ValueError(f"Width must be > 0, got {self._width}")
+                raise IndexError(f"Slice [{high}:{low}] out of bounds for {parent.name}[{parent.high}:{parent.low}]")
             self._low = low
             self._high = high
             
             # 2. raw_value
             if not 0 <= value < (1 << self._width):
-                raise ValueError(f"Invalid value: {value}")
+                max_val = (1 << self._width) - 1
+                raise ValueError(f"Value 0x{value:X} out of bounds for {self._width}-bit MapBV (max 0x{max_val:X})")
             self._raw_value = value
             
             # 3. name & tags
@@ -262,10 +268,11 @@ class MapBV(_BVBase):
             self._parent = parent
             self._type = "SLICE"
             if tags is not None:
-                raise ValueError()
+                raise ValueError("Slices cannot have custom tags; they inherit from their parent")
+            self._tags = None
             
         else:
-            raise ValueError()
+            raise TypeError(f"parent must be str, MapBV, or None, got {type(parent).__name__}")
 
         self._mask = (1 << self._width) - 1
 
@@ -361,6 +368,7 @@ class MapBV(_BVBase):
                 self._raw_value = val
 
     # -- linking ------------------------------------------------------------
+
     def _collect_linked(self, visited: set) -> None:
         for child in self._link_bv_list:
             visited.add(id(child))
@@ -371,7 +379,17 @@ class MapBV(_BVBase):
 
         The total width of all parts must equal ``self.width``.
         Re-linking a MapBV that is already linked emits a warning.
+
+        Only valid on VAR MapBVs.  Calling this on a SLICE raises TypeError;
+        create an explicit VAR to represent the sub-region instead.
         """
+        if self._type == "SLICE":
+            raise TypeError(
+                "Cannot call link() on a SLICE MapBV. "
+                "Create an explicit var() to represent the sub-region, "
+                "then link() that instead."
+            )
+
         for p in parts:
             reachable = set()
             p._collect_linked(reachable)    # pylint: disable=protected-access
@@ -382,7 +400,7 @@ class MapBV(_BVBase):
         
         total = 0
         for p in parts:
-            if p.type == "CONST":
+            if p.typ == "CONST":
                 warnings.warn(
                     f"Linking a CONST MapBV into '{self._name}'. Writes to this segment will be ignored.",
                     UserWarning,
@@ -403,6 +421,7 @@ class MapBV(_BVBase):
             )
         self._link_bv_list = list(parts)
 
+
     def unlink(self) -> None:
         """Remove the link structure, snapshot the current value.
 
@@ -417,16 +436,16 @@ class MapBV(_BVBase):
     # -- slicing ------------------------------------------------------------
 
     def __getitem__(self, key: int | slice) -> MapBV:
-        """``bv[high:low]`` → MapBVSlice (inclusive both ends)."""
+        """``bv[high:low]`` or ``bv[bit]`` → child MapBV (inclusive both ends)."""
         if isinstance(key, int):
             high = low = key
         elif isinstance(key, slice):
             high, low = key.start, key.stop
         else:
-            raise TypeError("MapBV indexing requires a slice, e.g. bv[7:0]")
+            raise TypeError("MapBV indexing requires int or slice, e.g. bv[7:0] or bv[3]")
         
         if high is None or low is None:
-            raise ValueError("Both high and low must be specified: bv[high:low]")
+            raise ValueError("Both high and low must be specified in slice: bv[high:low]")
         return MapBV(self, high, low)
 
     # -- symbolic eval ------------------------------------------------------
@@ -534,3 +553,52 @@ class MapBV(_BVBase):
         if self._type == "CONST":
             return f"MapBV(0x{self._raw_value:X}, {self._width})"
         return f"MapBV(\"{self._name}\", {self._width})"
+
+
+# ---------------------------------------------------------------------------
+# Factory functions  — preferred user-facing API
+# ---------------------------------------------------------------------------
+
+def const(value: int, width: int) -> MapBV:
+    """Create a constant (immutable) MapBV.
+
+    Mirrors the old ``MapBV(0xFF, 8)`` interface. Value is automatically
+    masked to *width* bits.
+
+    Usage::
+
+        import mypkg.data_types.mapbv as mbv
+        padding = mbv.const(0, 2)       # 2-bit zero constant
+        mask    = mbv.const(0xFF, 4)    # value auto-masked → 0xF
+
+    Args:
+        value: Integer value (masked to *width* bits automatically).
+        width: Bit width (must be > 0).
+
+    Returns:
+        A ``MapBV`` with ``typ == "CONST"``.
+    """
+    masked = value & ((1 << width) - 1)
+    return MapBV(None, width - 1, 0, value=masked)
+
+
+def var(name: str, width: int, tags: dict | None = None) -> MapBV:
+    """Create a named variable MapBV.
+
+    Mirrors the old ``MapBV("REG0", 16)`` interface.
+
+    Usage::
+
+        import mypkg.data_types.mapbv as mbv
+        reg = mbv.var("REG0", 16)
+        reg = mbv.var("REG0", 16, tags={"type": "RW", "addr": 0x100})
+
+    Args:
+        name:  Python identifier string for this register/signal.
+        width: Bit width (must be > 0).
+        tags:  Optional metadata dict for tag-aware :meth:`~MapBV.eval`.
+
+    Returns:
+        A ``MapBV`` with ``typ == "VAR"``.
+    """
+    return MapBV(name, width - 1, 0, tags=tags)

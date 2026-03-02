@@ -10,7 +10,7 @@ from mypkg.excel_extractor.types import CellCondition, Types
 from mypkg.excel_extractor.template import (
     Block, EmptyRow, Group, Row, AltNode, _parse_repeat,
 )
-from mypkg.excel_extractor.result import MatchOptions, BlockMatch, RowMatch, CellMatch
+from mypkg.excel_extractor.result import MatchOptions, BlockMatch
 from mypkg.excel_extractor.normalizer import InternalCell, InternalGrid
 from mypkg.excel_extractor.matcher import TemplateMatcher
 
@@ -39,12 +39,8 @@ def make_grid(rows: list[list]) -> InternalGrid:
             else:
                 if cell is None:
                     val = ""
-                elif isinstance(cell, int):
-                    val = str(cell)
-                elif isinstance(cell, float):
-                    val = str(int(cell)) if cell == int(cell) else str(cell)
                 else:
-                    val = cell
+                    val = str(cell)
                 internal_row.append(InternalCell(
                     value=val,
                     original_value=cell,

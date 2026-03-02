@@ -8,15 +8,16 @@
 ## 快速開始
 
 ```python
+import mypkg.data_types.mapbv as mbv
 from mypkg import MapBV
 
-# 宣告暫存器
-reg0 = MapBV("REG0", 16, tags={"type": "RW", "addr": 0x100})
-reg1 = MapBV("REG1", 16, tags={"type": "RO"})
-padding = MapBV(0, 2)               # 2-bit 常數
+# 使用工廠函式宣告暫存器
+reg0 = mbv.var("REG0", 16, tags={"type": "RW", "addr": 0x100})
+reg1 = mbv.var("REG1", 16, tags={"type": "RO"})
+padding = mbv.const(0, 2)               # 2-bit 常數
 
 # 定義 SRAM word: {REG0[3:0], padding, REG1[1:0]}
-sram = MapBV("SRAM_00", 8)
+sram = mbv.var("SRAM_00", 8)
 sram.link(reg0[3:0], padding, reg1[1:0])
 
 # 寫入 regs → 讀取 SRAM
@@ -35,11 +36,14 @@ print(reg0.to_hex(), reg1.to_hex())  # → 0x000F 0x0003
 ### 1. 宣告
 
 ```python
-# 帶有 metadata 的具名變數
-reg = MapBV("REG0", 16, tags={"type": "RW", "addr": 0x100})
+import mypkg.data_types.mapbv as mbv
 
-# 常數 (不可變 — 若嘗試寫入會觸發警告)
-padding = MapBV(0, 4)
+# 帶有 metadata 的具名變數
+reg = mbv.var("REG0", 16, tags={"type": "RW", "addr": 0x100})
+
+# 常數 (不可變 — 若嘗試寫入會觸發警告；數值自動 mask 至 width)
+padding = mbv.const(0, 4)
+mask    = mbv.const(0xFF, 4)   # → value is 0xF (masked to 4 bits)
 ```
 
 ### 2. 連結與雙向同步 (Linking & Bidirectional Sync)
@@ -47,7 +51,7 @@ padding = MapBV(0, 4)
 將零碎的訊號連結成一個較大的字組 (word)。數值變更會自動在**雙向**傳遞。
 
 ```python
-sram = MapBV("SRAM", 8)
+sram = mbv.var("SRAM", 8)
 sram.link(reg0[3:0], padding, reg1[1:0])   # 從 MSB 到 LSB 排列
 
 # 讀取: 將子元件當前的數值連接起來
@@ -70,12 +74,15 @@ reg.value = 0xABCD
 reg[7:0].value          # → 0xCD
 reg[15:8].value         # → 0xAB
 reg[7:4].value = 0xF    # 僅設定 bits 7~4
+reg[3]                  # → 1-bit 切片
 ```
 
-切片物件也可以當作**被連結的目標**：
+若要將局部區域由多個子欄位驅動，建立一個明確的 VAR：
 
 ```python
-reg[7:0].link(field_a, field_b)  # 重新建構部分區域的內容
+lower = var("REG_LOWER", 8)
+lower.link(field_a, field_b)
+reg.link(reg[15:8], lower)  # 上半部由切片，下半部由 lower 驅動
 ```
 
 ### 4. 邏輯與移位運算
@@ -88,7 +95,7 @@ result = reg0 << 4              # 左移
 result = reg0[7:0] ^ reg1[7:0]  # 切片同樣支援運算
 
 # 支援串聯式撰寫
-expr = (reg0 & 0x0F) | (reg1 ^ MapBV(0xFF, 16))
+expr = (reg0 & 0x0F) | (reg1 ^ mbv.const(0xFF, 16))
 print(expr.value)
 ```
 
@@ -112,8 +119,8 @@ print(sram.to_hex())            # → 0x52  (仍然跟原本一樣)
 當不同情境下存在同名暫存器（例如 "red" vs. "green"），可以使用 `MapBV.key()` 來建立包含標籤資訊的上下文 key：
 
 ```python
-reg0_red   = MapBV("REG0", 16, tags={"color": "red"})
-reg0_green = MapBV("REG0", 16, tags={"color": "green"})
+reg0_red   = mbv.var("REG0", 16, tags={"color": "red"})
+reg0_green = mbv.var("REG0", 16, tags={"color": "green"})
 
 sram_red.eval({
     MapBV.key("REG0", {"color": "red"}): 0x1,
@@ -131,7 +138,7 @@ for seg in sram.structure:
 
 # 輸出:
 # REG0 (3, 0) tags={'type': 'RW', ...}
-# CONST None   tags=None
+# Constant None   tags=None
 # REG1 (1, 0) tags={'type': 'RO'}
 ```
 
@@ -150,10 +157,21 @@ f"{reg:bin}"        # → "0b0000000011111111"
 word = MapBV.concat(a, b, c, name="WORD")
 backup = reg.copy("REG0_backup")
 sram.unlink()
-len(reg)            # → 16  (位元寬度)
-int(reg)            # → 轉為整數值
-reg == 0x42         # → True/False
+len(reg)              # → 16  (位元寬度)
+int(reg)              # → 轉為整數值
+reg.value_eq(0x42)    # → True/False  (請使用此方法比較值，而非 ==)
 ```
+
+### 9. 錯誤處理與驗證 (Error Handling & Validation)
+
+`MapBV` 提供詳細的錯誤訊息提示，以避免無效狀態和操作：
+
+- **無效變數名稱**: `ValueError("Invalid name '1bad': must be a valid Python identifier...")`
+- **數值超出範圍**: `ValueError("Value 0x100 out of bounds for 8-bit MapBV (max 0xFF)")`
+- **無效位元寬度或範圍**: `ValueError("Invalid range [2:5]: width must be > 0, got -2")`
+- **切片超出範圍**: `IndexError("Slice [8:0] out of bounds for REG[7:0]")`
+- **運算元超出寬度**: `ValueError("Operand 0x100 exceeds MapBV width 8 (max 0xFF)")`
+- **切片使用自訂標籤**: `ValueError("Slices cannot have custom tags; they inherit from their parent")`
 
 ---
 
@@ -161,26 +179,41 @@ reg == 0x42         # → True/False
 
 | 類別 | 說明 |
 |:------|:------------|
-| `MapBV(name_or_value, width, tags=None)` | 主 BitVector 類別 — 具名變數或常數 |
-| `MapBVSlice` | 來自 `bv[high:low]` 的存取代理，支援讀寫/連結/運算 |
+| `MapBV(parent, high, low)` | 核心 BitVector 節點 — 具名變數、常數或切片 |
 | `MapBVExpr` | 邏輯/位移運算所產生的表達樹 |
 | `StructSegment` | Frozen dataclass，包含 `.bv` 與 `.slice_range` |
+
+### 工廠函式（建議使用）
+
+| 函式 | 說明 |
+|:--------|:------------|
+| `const(value, width)` | 建立不可變常數（值自動 mask） |
+| `var(name, width, tags=None)` | 建立具名變數 |
+
+```python
+import mypkg.data_types.mapbv as mbv
+# 或: from mypkg import const, var
+
+padding = mbv.const(0, 2)
+reg     = mbv.var("REG0", 16, tags={"type": "RW"})
+```
 
 ### `MapBV` 屬性與方法
 
 | 成員 | 型別 | 說明 |
 |:-------|:-----|:------------|
-| `.name` | `str` | MapBV 的名稱（常數為 `"CONST"`） |
+| `.name` | `str` | 節點名稱（常數為 `"Constant"`） |
 | `.width` | `int` | 位元寬度 |
 | `.value` | `int` | 當前數值（支援讀寫；若有連結則採雙向更新） |
-| `.is_const` | `bool` | 是否為常數 |
-| `.tags` | `dict\|None` | 使用者 metadata（常數時為 `None`） |
+| `.typ` | `str` | 節點型別：`"CONST"`、`"VAR"` 或 `"SLICE"` |
+| `.tags` | `dict\|None` | 使用者 metadata（常數與切片為 `None`） |
+| `.value_eq(other)` | method | 數值比較（請使用此方法，而非 `==`） |
 | `.link(*parts)` | method | 定義為輸入元件的拼接組合 (MSB→LSB) |
 | `.unlink()` | method | 解除連結並紀錄當下快照數值 |
 | `.eval(ctx)` | method | 使用上下文字典進行符號化求值 |
 | `.structure` | `list[StructSegment]` | 已連結的元件組成列（未連結則為空） |
 | `.copy(name)` | method | 深拷貝成獨立的 MapBV |
-| `.snapshot(name)` | method | `.copy()` 的別名 |
 | `.to_hex()` | method | 補零的十六進位字串 |
 | `.to_bin()` | method | 補零的二進位字串 |
 | `.concat(*parts)` | classmethod | 利用來源元件建立並連結出新的 MapBV |
+| `.key(name, tags)` | staticmethod | 建立具 tag 資訊的 eval 上下文 key |
