@@ -1,6 +1,6 @@
 """MyPkg — A collection of utilities for IC design & verification."""
 
-from mypkg.data_types.mapbv import MapBV, MapBVExpr, StructSegment, const, var
+from mypkg.data_types.mapbv import MapBV, MapBVExpr, const, var, concat
 from mypkg.scheduler import Scheduler, Job, CmdJob
 
 try:
@@ -38,8 +38,8 @@ except ImportError:
 
 __all__ = [
     # data types
-    "MapBV", "MapBVExpr", "StructSegment",
-    "const", "var",
+    "MapBV", "MapBVExpr",
+    "const", "var", "concat",
     "NumBV",
     "NumBVArray",
     # scheduler

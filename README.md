@@ -32,7 +32,7 @@ Bit mapping, register structures, bidirectional synchronization, logic operation
 import mypkg.data_types.mapbv as mbv
 from mypkg import MapBV
 
-reg = mbv.var("REG0", 16, tags={"type": "RW", "addr": 0x100})
+reg = mbv.var("REG0", 16)
 sram = mbv.var("SRAM", 8)
 padding = mbv.const(0, 2)
 field = mbv.var("FIELD", 4)

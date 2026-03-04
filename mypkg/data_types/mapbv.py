@@ -2,38 +2,19 @@
 MapBitVector (MapBV) — A lightweight BitVector library for IC design & verification.
 
 Classes:
-    MapBV            — The main BitVector node (named variable or constant).
-    MapBVExpr        — A logic expression node produced by &, |, ^, ~ operators.
-    StructSegment    — A data object returned by MapBV.structure for introspection.
+    MapBV     — The main BitVector node (named variable, constant, or slice).
+    MapBVExpr — A logic expression node produced by &, |, ^, ~, <<, >> operators.
 
 Factory functions (preferred user-facing API):
-    const(value, width)         — Create a constant MapBV.
-    var(name, width, tags=None) — Create a named variable MapBV.
+    const(value, width)        — Create a constant MapBV.
+    var(name, width[, value])  — Create a named variable MapBV.
+    concat(name, *parts)       — Create a linked MapBV from parts (MSB → LSB).
 """
 
 from __future__ import annotations
 
 import warnings
-from copy import deepcopy
-from dataclasses import dataclass
 from abc import ABC, abstractmethod
-
-
-# ---------------------------------------------------------------------------
-# StructSegment  — returned by MapBV.structure
-# ---------------------------------------------------------------------------
-
-@dataclass(frozen=True, slots=True)
-class StructSegment:
-    """Describes one piece of a linked MapBV's composition.
-
-    Attributes:
-        bv:          The source MapBV object.
-        slice_range: (high, low) tuple if this segment is a slice,
-                     or None if the full MapBV is used.
-    """
-    bv: "MapBV"
-    slice_range: tuple[int, int] | None
 
 
 # ---------------------------------------------------------------------------
@@ -201,10 +182,8 @@ class MapBV(_BVBase):
         "_name",
         "_parent",
         "_high", "_low", "_width", "_mask",
-        "_type",                                # "CONST" | "VAR" | "SLICE"
+        "_kind",                                # "CONST" | "VAR" | "SLICE"
         "_raw_value",
-        "_tags",
-        "_eval_key",
         "_link_bv_list",
     )
 
@@ -214,7 +193,6 @@ class MapBV(_BVBase):
         high: int,
         low: int,
         value: int = 0,
-        tags: dict | None = None,
     ) -> None:
         if parent is None or isinstance(parent, str):
             # New instance
@@ -234,20 +212,18 @@ class MapBV(_BVBase):
                 raise ValueError(f"Value 0x{value:X} out of bounds for {self._width}-bit MapBV (max 0x{max_val:X})")
             self._raw_value = value
 
-            # 3. name & tags
+            # 3. name
             if parent is None:
                 self._name = "Constant"
                 self._parent = None
-                self._type = "CONST"
-                self._tags = None
+                self._kind = "CONST"
 
             else:
                 if not parent.isidentifier():
                     raise ValueError(f"Invalid name '{parent}': must be a valid Python identifier (e.g., 'REG0', 'sig_out')")
                 self._name = parent
                 self._parent = None
-                self._type = "VAR"
-                self._tags = tags
+                self._kind = "VAR"
 
         elif isinstance(parent, MapBV):
             # 1. width
@@ -263,28 +239,15 @@ class MapBV(_BVBase):
                 raise ValueError(f"Value 0x{value:X} out of bounds for {self._width}-bit MapBV (max 0x{max_val:X})")
             self._raw_value = value
             
-            # 3. name & tags
+            # 3. name
             self._name = f"{parent.name}[{high}:{low}]"
             self._parent = parent
-            self._type = "SLICE"
-            if tags is not None:
-                raise ValueError("Slices cannot have custom tags; they inherit from their parent")
-            self._tags = None
+            self._kind = "SLICE"
             
         else:
             raise TypeError(f"parent must be str, MapBV, or None, got {type(parent).__name__}")
 
         self._mask = (1 << self._width) - 1
-
-        # Pre-compute hashable eval key: (name, frozenset(tags.items()))
-        # Falls back to None if tags contain unhashable values (e.g. lists)
-        if self._tags:
-            try:
-                self._eval_key = (self._name, frozenset(self._tags.items()))
-            except TypeError:
-                self._eval_key = None
-        else:
-            self._eval_key = None
 
         # Linking state
         self._link_bv_list: list[MapBV] = []
@@ -300,27 +263,25 @@ class MapBV(_BVBase):
         return self._width
 
     @property
-    def tags(self) -> dict | None:
-        return self._tags
-    
-    @property
     def high(self) -> int:
         return self._high
 
     @property
     def low(self) -> int:
         return self._low
+    
+    @property
+    def kind(self) -> str:
+        return self._kind
+    
+    @property
+    def is_const(self) -> bool:
+        return self._kind == "CONST"
+    
+    @property
+    def is_linked(self) -> bool:
+        return len(self._link_bv_list) != 0
 
-    @property
-    def slice_info(self) -> tuple[MapBV, int, int] | None:
-        if self._parent is not None:
-            return (self._parent, self._high, self._low)
-        return None
-    
-    @property
-    def typ(self) -> str:
-        return self._type
-    
     # -- value access -------------------------------------------------------
 
     @property
@@ -348,7 +309,7 @@ class MapBV(_BVBase):
             clear = ~(self._mask << self._low) & ((1 << self._parent.width) - 1)
             self._parent.value = (self._parent.value & clear) | (val << self._low)
         
-        elif self._type == "CONST":
+        elif self._kind == "CONST":
             warnings.warn(
                 f"Attempted to write 0x{val:X} to constant MapBV "
                 f"(width={self._width}). Write ignored.",
@@ -374,16 +335,16 @@ class MapBV(_BVBase):
             visited.add(id(child))
             child._collect_linked(visited)  # pylint: disable=protected-access
 
-    def link(self, *parts: MapBV, force: bool = False) -> None:
+    def link(self, *parts: MapBV, _force: bool = False) -> None:
         """Define this MapBV as a concatenation of *parts* (MSB → LSB order).
 
         The total width of all parts must equal ``self.width``.
         Re-linking a MapBV that is already linked emits a warning.
 
-        Only valid on VAR MapBVs.  Calling this on a SLICE raises TypeError;
+        Only valid on VAR MapBVs. Calling this on a SLICE raises TypeError;
         create an explicit VAR to represent the sub-region instead.
         """
-        if self._type == "SLICE":
+        if self._kind == "SLICE":
             raise TypeError(
                 "Cannot call link() on a SLICE MapBV. "
                 "Create an explicit var() to represent the sub-region, "
@@ -398,21 +359,13 @@ class MapBV(_BVBase):
                     f"Circular link detected: '{self._name}' cannot link to '{p.name}'"
                 )
         
-        total = 0
-        for p in parts:
-            if p.typ == "CONST":
-                warnings.warn(
-                    f"Linking a CONST MapBV into '{self._name}'. Writes to this segment will be ignored.",
-                    UserWarning,
-                )
-            total += p.width
-
+        total = sum(p.width for p in parts)
         if total != self._width:
             raise ValueError(
                 f"Link width mismatch: parts total {total} bits, "
                 f"but {self._name} is {self._width} bits"
             )
-        if self._link_bv_list and force is False:
+        if self._link_bv_list and _force is False:
             warnings.warn(
                 f"MapBV '{self._name}' is already linked. "
                 f"Overwriting existing link structure.",
@@ -422,14 +375,15 @@ class MapBV(_BVBase):
         self._link_bv_list = list(parts)
 
 
-    def unlink(self) -> None:
-        """Remove the link structure, snapshot the current value.
+    def detach(self) -> None:
+        """Detach the link structure, snapshotting the current value.
 
-        After unlinking, the MapBV holds its last computed value as a raw value.
+        After detaching, the MapBV holds its last computed composite value
+        as a standalone raw value and is no longer connected to any parts.
+        Does nothing if the MapBV is not linked.
         """
         if not self._link_bv_list:
             return
-        # Snapshot the current composite value
         self._raw_value = self.value
         self._link_bv_list = []
 
@@ -453,18 +407,10 @@ class MapBV(_BVBase):
     def eval(self, ctx: dict) -> int:
         """Evaluate this MapBV symbolically using the context dict.
 
-        Context keys can be:
-
-        - **str** — matches any MapBV with that name (regardless of tags).
-        - **MapBV.key(name, tags)** — matches only if *both* name AND tags
-          dict are an exact match.
-
-        Lookup priority:
-          1. Tagged key ``(name, frozenset(tags))`` — exact match
-          2. Name-only string key — applies to all
-          3. Current ``.value`` (fallback)
+        Context keys are plain ``str`` names.
+        If the name is not found, falls back to the current ``.value``.
         """
-        if self._type == "CONST":
+        if self._kind == "CONST":
             return self._raw_value
 
         if self._parent is not None:
@@ -478,80 +424,41 @@ class MapBV(_BVBase):
                 result = (result << child.width) | child.eval(ctx)
             return result
 
-        # 1. Try tagged key (exact tags match)
-        if self._eval_key is not None and self._eval_key in ctx:
-            return ctx[self._eval_key] & self._mask
-
-        # 2. Try name-only key (applies to all with this name)
+        # Try name key; fall back to current value
         if self._name in ctx:
             return ctx[self._name] & self._mask
 
-        # 3. Fallback to current value
         return self._raw_value
 
-    # -- structure introspection --------------------------------------------
+    # -- human-readable representation -------------------------------------
 
-    @property
-    def structure(self) -> list[StructSegment]:
-        """Return the linked composition as a list of ``StructSegment``."""
+    def __str__(self) -> str:
+        """Return a human-readable layout of this MapBV.
+
+        For a linked MapBV, lists each part with its bit range, current
+        hex value, and source name, with the ``<-`` column aligned.
+
+        Example::
+
+            SRAM_00[7:0] (0x52)
+              [7:4] 0x05  <- REG0[3:0]
+              [3:2] 0x00  <- Constant
+              [1:0] 0x02  <- REG1[1:0]
+        """
+        header = f"{self.name}[{self.high}:{self.low}] ({self.to_hex()})"
         if not self._link_bv_list:
-            return []
-        segments: list[StructSegment] = []
-        for child in self._link_bv_list:
-            info = child.slice_info
-            if info is not None:
-                bv, high, low = info
-                segments.append(StructSegment(bv=bv, slice_range=(high, low)))
-            else:
-                segments.append(StructSegment(bv=child, slice_range=None))
-        return segments
+            return header + "\n  (no link)"
 
-    # -- class methods / static helpers ---------------------------------------
-
-    @staticmethod
-    def key(name: str, tags: dict) -> tuple:
-        """Create a hashable context key for :meth:`eval`.
-
-        Usage::
-
-            ctx = {
-                MapBV.key("REG0", {"color": "red"}): 0xAA,
-                "REG1": 0xBB,          # name-only, applies to all REG1
-            }
-            sram.eval(ctx)
-        """
-        return (name, frozenset(tags.items()))
-
-    @property
-    def eval_key(self) -> tuple | None:
-        """The hashable key that ``eval()`` uses to look up this MapBV.
-
-        Returns ``None`` for constants or BVs with empty tags.
-        """
-        return self._eval_key
-
-    @classmethod
-    def concat(cls, *parts: MapBV, name: str = "CONCAT") -> MapBV:
-        """Create a new linked MapBV by concatenating *parts* (MSB → LSB).
-
-        Automatically computes the total width.
-        """
-        total = sum(p.width for p in parts)
-        new_bv = cls(name, total - 1, 0)
-        new_bv._link_bv_list = list(parts)
-        return new_bv
-
-    # -- copy / snapshot ----------------------------------------------------
-
-    def copy(self, new_name: str | None = None) -> MapBV:
-        """Create an independent copy with the current value, no links."""
-        n = new_name if new_name is not None else f"{self._name}_copy"
-        new_bv = MapBV(n, self._width - 1, 0, value=self.value, tags=deepcopy(self._tags))
-        return new_bv
+        # Build (prefix, source_name) pairs first to compute alignment width
+        items = [
+            (f"  [{child.high}:{child.low}] {child.to_hex()}", child.name)
+            for child in self._link_bv_list
+        ]
+        col = max(len(prefix) for prefix, _ in items)
+        lines = [header] + [f"{prefix:<{col}}  <- {name}" for prefix, name in items]
+        return "\n".join(lines)
 
     def __repr__(self) -> str:
-        if self._type == "CONST":
-            return f"MapBV(0x{self._raw_value:X}, {self._width})"
         return f"MapBV(\"{self._name}\", {self._width})"
 
 
@@ -576,29 +483,52 @@ def const(value: int, width: int) -> MapBV:
         width: Bit width (must be > 0).
 
     Returns:
-        A ``MapBV`` with ``typ == "CONST"``.
+        A ``MapBV`` with ``kind == "CONST"``.
     """
     masked = value & ((1 << width) - 1)
     return MapBV(None, width - 1, 0, value=masked)
 
 
-def var(name: str, width: int, tags: dict | None = None) -> MapBV:
+def var(name: str, width: int, value: int = 0) -> MapBV:
     """Create a named variable MapBV.
-
-    Mirrors the old ``MapBV("REG0", 16)`` interface.
 
     Usage::
 
         import mypkg.data_types.mapbv as mbv
-        reg = mbv.var("REG0", 16)
-        reg = mbv.var("REG0", 16, tags={"type": "RW", "addr": 0x100})
+        reg = mbv.var("REG0", 16)           # initial value defaults to 0
+        reg = mbv.var("REG0", 16, 0xABCD)  # with initial value
 
     Args:
         name:  Python identifier string for this register/signal.
         width: Bit width (must be > 0).
-        tags:  Optional metadata dict for tag-aware :meth:`~MapBV.eval`.
+        value: Initial integer value (default 0).
 
     Returns:
-        A ``MapBV`` with ``typ == "VAR"``.
+        A ``MapBV`` with ``kind == "VAR"``.
     """
-    return MapBV(name, width - 1, 0, tags=tags)
+    return MapBV(name, width - 1, 0, value)
+
+
+def concat(name: str, *parts: MapBV) -> MapBV:
+    """Create a new linked MapBV by concatenating *parts* (MSB → LSB).
+
+    Automatically computes the total width from parts.
+    The resulting MapBV value is always derived live from its parts;
+    writing to it distributes bits back to each part.
+
+    Usage::
+
+        import mypkg.data_types.mapbv as mbv
+        sram = mbv.concat("SRAM", reg0[3:0], padding, reg1[1:0])
+
+    Args:
+        name:  Python identifier for the resulting MapBV.
+        parts: Source MapBVs in MSB → LSB order.
+
+    Returns:
+        A ``MapBV`` with ``kind == "VAR"`` and ``is_linked == True``.
+    """
+    total = sum(p.width for p in parts)
+    new_bv = MapBV(name, total - 1, 0)
+    new_bv.link(*parts)
+    return new_bv
