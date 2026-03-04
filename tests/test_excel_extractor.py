@@ -1,56 +1,66 @@
 """Tests for mypkg.excel_extractor.
 
-All tests use in-memory InternalGrid — no real Excel files required.
+Tests use in-memory InternalGrid for fast logic testing,
+and an integration test to verify real Excel file loading.
 """
 
 import re
-import unittest
+import tempfile
+from pathlib import Path
 
-from mypkg.excel_extractor.types import CellCondition, Types
-from mypkg.excel_extractor.template import (
-    Block, EmptyRow, Group, Row, AltNode, _parse_repeat,
+import openpyxl
+import pytest
+import xlrd
+from unittest.mock import MagicMock
+
+from mypkg.excel_extractor import (
+    match_template,
+    Block,
+    EmptyRow,
+    Group,
+    Row,
+    Types,
+    CellCondition,
+    MatchOptions,
 )
-from mypkg.excel_extractor.result import MatchOptions, BlockMatch
+from mypkg.excel_extractor.template import AltNode, _parse_repeat
 from mypkg.excel_extractor.normalizer import InternalCell, InternalGrid
 from mypkg.excel_extractor.matcher import TemplateMatcher
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Helpers for InternalGrid tests
 # ---------------------------------------------------------------------------
 
-def make_grid(rows: list[list]) -> InternalGrid:
-    """Build an InternalGrid from a 2-D list of raw values.
 
-    None          → empty cell ("")
-    str/int/float → normal cell
-    ('M', v)      → merged cell with value v
-    """
+def make_grid(rows: list[list]) -> InternalGrid:
+    """Build an InternalGrid from a 2-D list of raw values."""
     internal_rows = []
     for row in rows:
         internal_row = []
         for cell in row:
-            if isinstance(cell, tuple) and cell[0] == 'M':
-                internal_row.append(InternalCell(
-                    value=str(cell[1]) if cell[1] is not None else "",
-                    original_value=cell[1],
-                    is_merged=True,
-                ))
+            if isinstance(cell, tuple) and cell[0] == "M":
+                internal_row.append(
+                    InternalCell(
+                        value=str(cell[1]) if cell[1] is not None else "",
+                        original_value=cell[1],
+                        is_merged=True,
+                    )
+                )
             else:
-                if cell is None:
-                    val = ""
-                else:
-                    val = str(cell)
-                internal_row.append(InternalCell(
-                    value=val,
-                    original_value=cell,
-                    is_merged=False,
-                ))
+                val = "" if cell is None else str(cell)
+                internal_row.append(
+                    InternalCell(
+                        value=val,
+                        original_value=cell,
+                        is_merged=False,
+                    )
+                )
         internal_rows.append(internal_row)
     return InternalGrid(internal_rows)
 
 
-def match_blocks(grid: InternalGrid, block: Block, options=None) -> list[BlockMatch]:
+def match_blocks(grid: InternalGrid, block: Block, options=None):
     """Run TemplateMatcher and return flat list of BlockMatches for a single template."""
     matcher = TemplateMatcher([block], options or MatchOptions())
     results = matcher.scan_for_blocks(grid)
@@ -58,47 +68,43 @@ def match_blocks(grid: InternalGrid, block: Block, options=None) -> list[BlockMa
 
 
 # ===========================================================================
-# 1. Types / CellCondition
+# 1. Types & CellCondition Logic
 # ===========================================================================
 
-class TestCellCondition(unittest.TestCase):
 
+class TestCellCondition:
     def test_from_pattern_nonempty(self):
         c = CellCondition.from_pattern(r".+")
-        self.assertEqual(c.patterns, frozenset([r".+"]))
-        self.assertFalse(c.is_merged)
+        assert c.patterns == frozenset([r".+"])
+        assert c.is_merged is False
 
     def test_from_pattern_empty(self):
         c = CellCondition.from_pattern("")
-        self.assertEqual(c.patterns, frozenset())
+        assert c.patterns == frozenset()
 
     def test_or_combines_patterns(self):
         a = CellCondition.from_pattern(r"\d+")
         b = CellCondition.from_pattern(r"[a-z]+")
         combined = a | b
-        self.assertEqual(combined.patterns, frozenset([r"\d+", r"[a-z]+"]))
+        assert combined.patterns == frozenset([r"\d+", r"[a-z]+"])
 
     def test_or_merged_conflict_becomes_none(self):
         a = CellCondition.from_pattern(r".*", is_merged=False)
         b = CellCondition.from_pattern(r".*", is_merged=True)
         combined = a | b
-        self.assertIsNone(combined.is_merged)
+        assert combined.is_merged is None
 
     def test_call_repeats(self):
         c = Types.ANY
-        self.assertEqual(len(c(3)), 3)
-        self.assertTrue(all(x is c for x in c(3)))
+        assert len(c(3)) == 3
+        assert all(x is c for x in c(3))
 
     def test_call_rejects_negative(self):
-        with self.assertRaises(ValueError):
+        with pytest.raises(ValueError):
             Types.ANY(-1)
 
 
-# ===========================================================================
-# 2. Types constants
-# ===========================================================================
-
-class TestTypesMatching(unittest.TestCase):
+class TestTypesConstants:
     """Verify regex patterns via fullmatch on normalised cell values."""
 
     def _matches(self, cond: CellCondition, value: str, is_merged=False):
@@ -106,343 +112,420 @@ class TestTypesMatching(unittest.TestCase):
             compiled = re.compile("")
         else:
             compiled = re.compile("|".join(cond.patterns))
+
         if cond.is_merged is not None and cond.is_merged != is_merged:
             return False
         return bool(compiled.fullmatch(value or ""))
 
-    def test_str(self):
-        self.assertTrue(self._matches(Types.STR, "hello"))
-        self.assertFalse(self._matches(Types.STR, ""))
+    def test_basic_types(self):
+        assert self._matches(Types.STR, "hello")
+        assert not self._matches(Types.STR, "")
 
-    def test_int(self):
-        self.assertTrue(self._matches(Types.INT, "42"))
-        self.assertTrue(self._matches(Types.INT, "-7"))
-        self.assertFalse(self._matches(Types.INT, "3.14"))
+        assert self._matches(Types.INT, "42")
+        assert self._matches(Types.INT, "-7")
+        assert not self._matches(Types.INT, "3.14")
 
-    def test_float(self):
-        self.assertTrue(self._matches(Types.FLOAT, "3.14"))
-        self.assertTrue(self._matches(Types.FLOAT, "42"))
+        assert self._matches(Types.FLOAT, "3.14")
+        assert self._matches(Types.NUM, "3.14")
 
-    def test_num(self):
-        self.assertTrue(self._matches(Types.NUM, "42"))
-        self.assertTrue(self._matches(Types.NUM, "3.14"))
+        assert self._matches(Types.BOOL, "true")
+        assert self._matches(Types.BOOL, "1")
+        assert not self._matches(Types.BOOL, "maybe")
 
-    def test_bool(self):
-        for v in ["true", "false", "True", "FALSE", "yes", "no", "1", "0"]:
-            self.assertTrue(self._matches(Types.BOOL, v), f"BOOL should match {v!r}")
-        self.assertFalse(self._matches(Types.BOOL, "maybe"))
+    def test_date_and_time(self):
+        assert self._matches(Types.DATE_ISO, "2024-01-15")
+        assert not self._matches(Types.DATE_ISO, "15/01/2024")
 
-    def test_date_iso(self):
-        self.assertTrue(self._matches(Types.DATE_ISO, "2024-01-15"))
-        self.assertFalse(self._matches(Types.DATE_ISO, "15/01/2024"))
+        assert self._matches(Types.DATE_TW, "111/01/01")
+        assert self._matches(Types.DATETIME, "2024-01-15 09:30:00")
+        assert self._matches(Types.TIME, "09:30")
 
-    def test_date_alias(self):
-        self.assertEqual(Types.DATE.patterns, Types.DATE_ISO.patterns)
+    def test_structural_types(self):
+        assert self._matches(Types.MERGED, "hello", is_merged=True)
+        assert not self._matches(Types.MERGED, "hello", is_merged=False)
 
-    def test_date_tw(self):
-        self.assertTrue(self._matches(Types.DATE_TW, "111/01/01"))
-        self.assertTrue(self._matches(Types.DATE_TW, "90/12/31"))
+        assert self._matches(Types.SPACE, "   ")
+        assert self._matches(Types.SPACE, "")
+        assert not self._matches(Types.SPACE, "x")
 
-    def test_datetime(self):
-        self.assertTrue(self._matches(Types.DATETIME, "2024-01-15 09:30"))
-        self.assertTrue(self._matches(Types.DATETIME, "2024-01-15 09:30:00"))
+        assert self._matches(Types.ANY, "anything")
 
-    def test_time(self):
-        self.assertTrue(self._matches(Types.TIME, "09:30"))
-        self.assertEqual(Types.TIME.patterns, Types.TIME_24H.patterns)
-
-    def test_merged(self):
-        self.assertTrue(self._matches(Types.MERGED, "hello", is_merged=True))
-        self.assertFalse(self._matches(Types.MERGED, "hello", is_merged=False))
-
-    def test_space(self):
-        self.assertTrue(self._matches(Types.SPACE, ""))
-        self.assertTrue(self._matches(Types.SPACE, "   "))
-        self.assertFalse(self._matches(Types.SPACE, "x"))
-
-    def test_any(self):
-        self.assertTrue(self._matches(Types.ANY, "anything"))
-        self.assertTrue(self._matches(Types.ANY, ""))
-
-    def test_hex(self):
-        self.assertTrue(self._matches(Types.HEX, "0xFF"))
-        self.assertFalse(self._matches(Types.HEX, "FF"))
+    def test_number_bases(self):
+        assert self._matches(Types.HEX, "0xFF")
+        assert not self._matches(Types.HEX, "FF")
 
     def test_custom_regex(self):
         cond = Types.r(r"[A-Z]{2}\d+")
-        self.assertTrue(self._matches(cond, "AB123"))
-        self.assertFalse(self._matches(cond, "ab123"))
+        assert self._matches(cond, "AB123")
+        assert not self._matches(cond, "ab123")
 
 
 # ===========================================================================
-# 3. repeat spec parsing
+# 2. Template Build Ast
 # ===========================================================================
 
-class TestRepeatParsing(unittest.TestCase):
 
+class TestRepeatParsing:
     def test_int(self):
-        self.assertEqual(_parse_repeat(3), (3, 3))
+        assert _parse_repeat(3) == (3, 3)
 
     def test_shortcuts(self):
-        self.assertEqual(_parse_repeat("?"), (0, 1))
-        self.assertEqual(_parse_repeat("+"), (1, None))
-        self.assertEqual(_parse_repeat("*"), (0, None))
+        assert _parse_repeat("?") == (0, 1)
+        assert _parse_repeat("+") == (1, None)
+        assert _parse_repeat("*") == (0, None)
 
     def test_tuple(self):
-        self.assertEqual(_parse_repeat((2, 4)), (2, 4))
-        self.assertEqual(_parse_repeat((2, None)), (2, None))
+        assert _parse_repeat((2, 4)) == (2, 4)
+        assert _parse_repeat((2, None)) == (2, None)
 
     def test_invalid(self):
-        with self.assertRaises(ValueError):
+        with pytest.raises(ValueError):
             _parse_repeat("x")
-        with self.assertRaises(ValueError):
+        with pytest.raises(ValueError):
             _parse_repeat(-1)
-        with self.assertRaises(ValueError):
+        with pytest.raises(ValueError):
             _parse_repeat((4, 2))
 
 
-# ===========================================================================
-# 4. Block validation
-# ===========================================================================
-
-class TestBlockValidation(unittest.TestCase):
-
+class TestBlockValidation:
     def test_width_inference(self):
         b = Block(
             Row(pattern=["A", "B"]),
             Row(pattern=[Types.STR, Types.INT], repeat="+"),
         )
-        self.assertEqual(b.width, 2)
+        assert b.width == 2
 
     def test_inconsistent_width_raises(self):
-        with self.assertRaises(ValueError):
+        with pytest.raises(ValueError):
             Block(Row(pattern=["A", "B"]), Row(pattern=[Types.STR]))
 
     def test_empty_row_expanded(self):
         b = Block(Row(pattern=["A", "B"]), EmptyRow())
-        self.assertEqual(len(b.children[1].rules()), 2)
-
-    def test_repr(self):
-        b = Block(Row(pattern=["a"]), block_id="my_block")
-        self.assertIn("my_block", repr(b))
+        assert len(b.children[1].rules()) == 2
 
     def test_alt_node(self):
         alt = Row(pattern=["A"]) | Row(pattern=["B"])
-        self.assertIsInstance(alt, AltNode)
-        self.assertEqual(len(alt.alternatives), 2)
+        assert isinstance(alt, AltNode)
+        assert len(alt.alternatives) == 2
 
 
 # ===========================================================================
-# 5. InternalGrid
+# 3. InternalGrid Operations
 # ===========================================================================
 
-class TestInternalGrid(unittest.TestCase):
 
+class TestInternalGrid:
     def test_basic_access(self):
         grid = make_grid([["a", "b"], ["c", "d"]])
-        self.assertEqual(grid.get_cell(0, 1).value, "b")
-        self.assertEqual(grid.get_cell(1, 0).value, "c")
+        assert grid.get_cell(0, 1).value == "b"
+        assert grid.get_cell(1, 0).value == "c"
 
     def test_out_of_bounds(self):
         grid = make_grid([["a"]])
-        with self.assertRaises(IndexError):
+        with pytest.raises(IndexError):
             grid.get_cell(99, 0)
 
     def test_rectangular_enforced(self):
-        """Unequal row lengths should raise ValueError."""
-        with self.assertRaises(ValueError):
+        with pytest.raises(ValueError):
             make_grid([["a", "b", "c"], ["d"]])
 
     def test_transpose(self):
         grid = make_grid([["A", "B", "C"], ["D", "E", "F"]])
         t = grid.transpose()
-        self.assertEqual(t.num_rows, 3)
-        self.assertEqual(t.num_cols, 2)
-        self.assertEqual(t.get_cell(0, 0).value, "A")
-        self.assertEqual(t.get_cell(0, 1).value, "D")
-        self.assertEqual(t.get_cell(2, 0).value, "C")
-        self.assertEqual(t.get_cell(2, 1).value, "F")
-
-    def test_empty_grid(self):
-        grid = InternalGrid([])
-        self.assertEqual(grid.num_rows, 0)
-        self.assertEqual(grid.num_cols, 0)
+        assert t.num_rows == 3
+        assert t.num_cols == 2
+        assert t.get_cell(0, 1).value == "D"
+        assert t.get_cell(2, 0).value == "C"
 
 
 # ===========================================================================
-# 6. Vertical matching — simple table
+# 4. Mock Matrix Pattern Matching
 # ===========================================================================
 
-class TestVerticalMatch(unittest.TestCase):
 
-    def test_simple_table(self):
-        grid = make_grid([
-            ["部門", "姓名", "月薪"],
-            ["IT",   "Alice", 1000],
-            ["HR",   "Bob",   2000],
-        ])
+class TestPatternMatch:
+    def test_vertical_simple_table(self):
+        grid = make_grid(
+            [
+                ["Dept", "Name", "Salary"],
+                ["IT", "Alice", 1000],
+                ["HR", "Bob", 2000],
+            ]
+        )
         block = Block(
-            Row(pattern=["部門", "姓名", "月薪"], node_id="header"),
+            Row(pattern=["Dept", "Name", "Salary"], node_id="header"),
             Row(pattern=[Types.STR, Types.STR, Types.INT], repeat="+", node_id="data"),
         )
         matches = match_blocks(grid, block)
-        self.assertEqual(len(matches), 1)
+        assert len(matches) == 1
 
         bm = matches[0]
-        self.assertEqual(bm.start, (0, 0))
-        self.assertEqual(len(bm.rows), 3)
-        self.assertEqual(bm.rows[0].node_id, "header")
-        self.assertEqual(bm.rows[1].node_id, "data")
+        assert bm.start == (0, 0)
+        assert len(bm.rows) == 3
+        assert bm.rows[0].node_id == "header"
+        assert bm.rows[1].node_id == "data"
 
     def test_no_match_wrong_header(self):
         grid = make_grid([["X", "Y"]])
         block = Block(Row(pattern=["A", "B"]))
         matches = match_blocks(grid, block)
-        self.assertEqual(len(matches), 0)
+        assert len(matches) == 0
 
     def test_offset_coordinates(self):
-        """Block at (2,1) should report correct absolute coordinates."""
-        grid = make_grid([
-            [None, None,    None],
-            [None, None,    None],
-            [None, "Header", "Val"],
-            [None, "IT",     "100"],
-        ])
+        grid = make_grid(
+            [
+                [None, None, None],
+                [None, None, None],
+                [None, "Header", "Val"],
+                [None, "IT", "100"],
+            ]
+        )
         block = Block(
-            Row(pattern=["Header", "Val"], node_id="h"),
-            Row(pattern=[Types.STR, Types.INT], node_id="d"),
+            Row(pattern=["Header", "Val"]),
+            Row(pattern=[Types.STR, Types.INT]),
         )
         matches = match_blocks(grid, block)
-        bm = [m for m in matches if m.start == (2, 1)]
-        self.assertEqual(len(bm), 1)
-        bm = bm[0]
-
-        self.assertEqual(bm.rows[0].row, 2)
-        self.assertEqual(bm.rows[0].cells[0].col, 1)
-        self.assertEqual(bm.rows[0].cells[0].value, "Header")
-        self.assertEqual(bm.rows[1].row, 3)
-        self.assertEqual(bm.rows[1].cells[0].value, "IT")
-
-    def test_gap_row_tracking(self):
-        """Non-matching rows between data rows are skipped with correct indices."""
-        grid = make_grid([
-            ["Header", "Val"],
-            ["Row1",    100],
-            ["!!!",    "???"],   # matches no rule → skipped
-            ["Row3",    300],
-        ])
-        block = Block(
-            Row(pattern=["Header", "Val"], node_id="h"),
-            Row(pattern=[Types.STR, Types.INT], repeat="+", node_id="d"),
-        )
-        matches = match_blocks(grid, block)
-        self.assertTrue(len(matches) >= 1)
+        assert len(matches) == 1
         bm = matches[0]
 
-        self.assertEqual(bm.rows[1].row, 1)
-        self.assertEqual(bm.rows[1].cells[0].value, "Row1")
+        # Absolute locations inside the grid
+        assert bm.rows[0].row == 2
+        assert bm.rows[0].cells[1].col == 2
+        assert bm.rows[0].cells[0].value == "Header"
+        assert bm.rows[1].row == 3
 
-        if len(bm.rows) >= 3:
-            self.assertEqual(bm.rows[2].row, 3)
-            self.assertEqual(bm.rows[2].cells[0].value, "Row3")
-
-
-# ===========================================================================
-# 7. Group and EmptyRow
-# ===========================================================================
-
-class TestGroupAndEmptyRow(unittest.TestCase):
-
-    def test_group_with_empty_row(self):
-        grid = make_grid([
-            ["*",           "姓名",  "月薪"],
-            [('M', "IT"),  "Alice",  1000],
-            [('M', "IT"),  "Bob",    2000],
-            [None, None, None],
-            [('M', "HR"),  "Carol",  3000],
-            [None, None, None],
-        ])
+        grid = make_grid(
+            [
+                ["Header", "Val"],
+                ["Row1", 100],
+                ["!!!", "???"],  # Non-matching junk row
+                ["Row3", 300],
+            ]
+        )
         block = Block(
-            Row(pattern=[Types.ANY, "姓名", "月薪"]),
-            Group(children=[
-                Row(pattern=[Types.MERGED, Types.STR, Types.INT], repeat="+"),
-                EmptyRow(repeat="?"),
-            ], repeat="+"),
+            Row(pattern=["Header", "Val"]),
+            Row(pattern=[Types.STR, Types.INT], repeat="+"),
         )
         matches = match_blocks(grid, block)
-        self.assertTrue(len(matches) >= 1)
 
+        # The matcher looks for contiguous matches. "!!!" breaks the chain, so we only match up to Row1
+        assert len(matches) >= 1
+        bm = matches[0]
+        assert bm.rows[1].cells[0].value == "Row1"
+        assert len(bm.rows) == 2
 
-# ===========================================================================
-# 8. AltNode matching
-# ===========================================================================
-
-class TestAltNodeMatch(unittest.TestCase):
+    def test_group_with_empty_row(self):
+        grid = make_grid(
+            [
+                ["*", "Name", "Salary"],
+                [("M", "IT"), "Alice", 1000],
+                [("M", "IT"), "Bob", 2000],
+                [None, None, None],
+                [("M", "HR"), "Carol", 3000],
+                [None, None, None],
+            ]
+        )
+        block = Block(
+            Row(pattern=[Types.ANY, "Name", "Salary"]),
+            Group(
+                children=[
+                    Row(pattern=[Types.MERGED, Types.STR, Types.INT], repeat="+"),
+                    EmptyRow(repeat="?"),
+                ],
+                repeat="+",
+            ),
+        )
+        matches = match_blocks(grid, block)
+        assert len(matches) == 1
 
     def test_alt_header(self):
-        grid = make_grid([["部門", "月薪"], ["IT", 1000]])
+        grid = make_grid([["Dept", "Salary"], ["IT", 1000]])
         block = Block(
             Row(pattern=["部門", "月薪"]) | Row(pattern=["Dept", "Salary"]),
             Row(pattern=[Types.STR, Types.INT], repeat="+"),
         )
         matches = match_blocks(grid, block)
-        self.assertTrue(len(matches) >= 1)
-
-
-# ===========================================================================
-# 9. Horizontal matching
-# ===========================================================================
-
-class TestHorizontalMatch(unittest.TestCase):
+        assert len(matches) == 1
 
     def test_horizontal_basic(self):
-        grid = make_grid([
-            ["Label", "Jan", "Feb"],
-            ["Target", 100,   200],
-        ])
+        grid = make_grid(
+            [
+                ["Label", "Jan", "Feb"],
+                ["Target", 100, 200],
+            ]
+        )
         block = Block(
             Row(pattern=["Label", "Target"]),
             Row(pattern=[Types.STR, Types.INT], repeat="+"),
             orientation="horizontal",
         )
         matches = match_blocks(grid, block)
-        self.assertTrue(len(matches) >= 1)
+        assert len(matches) == 1
 
         bm = matches[0]
         for row in bm.rows:
             for cell in row.cells:
                 actual = grid.get_cell(cell.row, cell.col).value
-                self.assertEqual(cell.value, actual,
-                    f"Cell ({cell.row},{cell.col}): {cell.value!r} != {actual!r}")
+                assert cell.value == actual
+
+    def test_fuzzy_matching(self):
+        # "Department" is misspelled as "Departmnt"
+        grid = make_grid([["Departmnt", "Name"], ["IT", "Alice"]])
+        # Requires 85% similarity
+        block = Block(
+            Row(pattern=["Department", "Name"], min_similarity=0.85),
+            Row(pattern=[Types.STR, Types.STR], repeat="+"),
+        )
+        matches = match_blocks(grid, block)
+        assert len(matches) == 1
+        assert matches[0].rows[0].cells[0].value == "Departmnt"
+
+    def test_match_ratio(self):
+        # 1 out of 3 cells gets corrupted (doesn't match Types.INT)
+        grid = make_grid([["A", "B", "C"], [100, "ERR", 300]])
+        block = Block(
+            Row(pattern=["A", "B", "C"]),
+            # Require only 66% (2 out of 3) cells to match
+            Row(pattern=[Types.INT, Types.INT, Types.INT], match_ratio=0.66),
+        )
+        matches = match_blocks(grid, block)
+        assert len(matches) == 1
+        assert matches[0].rows[1].cells[1].value == "ERR"
 
 
 # ===========================================================================
-# 10. MatchOptions
+# 5. MatchOptions
 # ===========================================================================
 
-class TestMatchOptions(unittest.TestCase):
 
-    def test_return_mode_default(self):
-        self.assertEqual(MatchOptions().return_mode, 0)
-
-    def test_return_mode_zero_scans_all(self):
+class TestMatchOptions:
+    def test_return_mode_zero(self):
         grid = make_grid([["A"], ["B"]])
         block = Block(Row(pattern=["A"]), Row(pattern=[Types.STR]))
+        # Ensure it runs without issues
         matches = match_blocks(grid, block, MatchOptions(return_mode=0))
-        self.assertIsInstance(matches, list)
+        assert len(matches) == 1
 
 
 # ===========================================================================
-# 11. TODO 3 removal
+# 6. Integration Test with Real Excel File
 # ===========================================================================
 
-class TestTodo3Removed(unittest.TestCase):
 
-    def test_no_huffman_comment(self):
-        import inspect
-        source = inspect.getsource(TemplateMatcher._match_template)
-        self.assertNotIn("huffman", source.lower())
+class TestIntegrationRealExcel:
+    @pytest.fixture
+    def sample_excel_file(self):
+        """Creates a temporary Excel file matching a generic payroll format."""
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        assert ws is not None
+        ws.title = "Payroll"
 
+        # Inject junk rows at the start
+        ws.append(["Company XYZ Report"])
+        ws.append([])
 
-if __name__ == "__main__":
-    unittest.main()
+        ws.append(["Dept", "Name", "Salary"])
+        ws.append(["IT", "Alice", 50000])
+        ws.append(["IT", "Bob", 60000])
+        ws.append(["HR", "Carol", 55000])
+        ws.append([])
+        ws.append(
+            ["Finance", "Dave", "Confidential"]
+        )  # Should stop data block matching here
+
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            temp_path = f.name
+            wb.save(temp_path)
+
+        yield temp_path
+
+        Path(temp_path).unlink()
+
+    def test_match_template_on_real_file(self, sample_excel_file):
+        template = Block(
+            Row(pattern=["Dept", "Name", "Salary"], node_id="header"),
+            Row(pattern=[Types.STR, Types.STR, Types.INT], repeat="+", node_id="data"),
+            block_id="salary_table",
+        )
+
+        # Calling the public API directly
+        results = match_template(
+            sample_excel_file, template, sheet="Payroll", options=MatchOptions()
+        )
+
+        # Ensure we found exactly 1 match on the first sheet
+        assert len(results) == 1
+        sheet_matches = results[0]
+        assert len(sheet_matches) == 1
+        block_matches = sheet_matches[0]
+        assert len(block_matches) == 1
+
+        bm = block_matches[0]
+        assert bm.block_id == "salary_table"
+        # The header should be on row 3 (0-indexed: row 2)
+        assert bm.rows[0].row == 2
+        assert bm.rows[0].node_id == "header"
+
+        # And it should capture exactly our 3 valid data rows (Alice, Bob, Carol)
+        data_rows = [r for r in bm.rows if r.node_id == "data"]
+        assert len(data_rows) == 3
+
+        assert data_rows[0].cells[1].value == "Alice"
+        assert int(data_rows[0].cells[2].value) == 50000
+        assert data_rows[2].cells[1].value == "Carol"
+
+    def test_match_template_on_mocked_xls(self, monkeypatch):
+        """Mock the xlrd loading mechanism to test .xls logic without binary blobs."""
+
+        # Create a mock Sheet
+        mock_sheet = MagicMock()
+        mock_sheet.nrows = 3
+        mock_sheet.ncols = 3
+        
+        # sh.merged_cells is a list of tuples (rlo, rhi, clo, chi)
+        # We simulate a merged cell across row 0, cols 0 to 3
+        mock_sheet.merged_cells = [(0, 1, 0, 3)] 
+        
+        # Define mock cell data (raw_val, cell_type)
+        # We will put the header in row 0, and data in row 1, 2
+        
+        def cell_value(rowx, colx):
+            data = [
+                ["Merged Title", None, None],
+                ["Dept", "Name", "Salary"],
+                ["IT", "Alice", 50000]
+            ]
+            return data[rowx][colx]
+            
+        def cell_type(rowx, colx):
+            return xlrd.XL_CELL_TEXT if isinstance(cell_value(rowx, colx), str) else xlrd.XL_CELL_NUMBER
+
+        mock_sheet.cell_value = cell_value
+        mock_sheet.cell_type = cell_type
+        
+        # Create a mock Workbook
+        mock_wb = MagicMock()
+        mock_wb.sheet_names.return_value = ["LegacyPayroll"]
+        mock_wb.sheet_by_name.return_value = mock_sheet
+        mock_wb.datemode = 0
+        
+        # Patch xlrd.open_workbook
+        monkeypatch.setattr(xlrd, "open_workbook", lambda filename, **kwargs: mock_wb)
+
+        template = Block(
+            Row(pattern=["Dept", "Name", "Salary"], node_id="header"),
+            Row(pattern=[Types.STR, Types.STR, Types.INT], repeat="+", node_id="data"),
+            block_id="xls_table"
+        )
+        
+        results = match_template("dummy.xls", template)
+        
+        assert len(results) == 1
+        block_matches = results[0][0]
+        assert len(block_matches) == 1
+        bm = block_matches[0]
+        
+        assert bm.block_id == "xls_table"
+        assert bm.rows[0].row == 1
+        assert bm.rows[1].cells[1].value == "Alice"

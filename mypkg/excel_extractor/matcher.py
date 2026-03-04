@@ -57,7 +57,7 @@ class CompiledRuleId:
     
     @property
     def symbol(self) -> str:
-        return chr(0xF0000 + self.value)
+        return f"{self.value}d"
 
 
 @dataclass(frozen=True, slots=True)
@@ -166,6 +166,8 @@ class TemplateMatcher:
             symbol = self._match_row(cid_row, compiled_template)
             if symbol is not None:
                 row_symbols.append((idx, symbol))
+            else:
+                break
         joined = "".join(rid.symbol for _, rid in row_symbols)
 
         # TODO Maybe use other method to deal with group, '*', '+', ... operation
@@ -297,8 +299,6 @@ class TemplateMatcher:
 
         if key not in self._seen:
             num_rule = len(self._seen)
-            if num_rule > 0xFFFF:
-                raise RuntimeError("Too many unique rules (>65534), this is likely a bug.")
             self._seen[key] = CompiledRuleId(num_rule)
             self._rule_id_map[CompiledRuleId(num_rule)] = key
         return self._seen[key].symbol
@@ -328,7 +328,7 @@ class TemplateMatcher:
         if isinstance(node, Group):
             parts = [self._visit(child) for child in node.children]
             return f"({''.join(parts)}){suffix}"
-        return f"{self._register(node)}{suffix}"
+        return f"({self._register(node)}){suffix}"
 
 
 # ---------------------------------------------------------------------------

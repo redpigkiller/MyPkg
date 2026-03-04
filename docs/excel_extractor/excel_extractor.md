@@ -3,25 +3,25 @@
 [![English](https://img.shields.io/badge/Language-English-blue.svg)](excel_extractor.md)
 [![繁體中文](https://img.shields.io/badge/語言-繁體中文-blue.svg)](excel_extractor_zh.md)
 
-## What is Excel Extractor?
+Reading structured data from non-standard Excel files is tedious. Every time the layout shifts a row or offsets a column, your fixed-coordinate `sheet.cell(row, col)` code breaks completely.
 
-Reading structured data from Excel files is tedious. Every time the layout shifts one row, your `sheet.cell(row, col)` code breaks.
-
-**Excel Extractor** takes a different approach: you describe the *shape* of the data you expect (a "template"), and the engine finds it for you — wherever it lives on the sheet.
+**Excel Extractor** takes a fundamentally different approach: you describe the *shape* of the data you expect (a template "Block" with column definitions), and the engine scans the sheet to automatically find where it matches and what its contents are.
 
 ---
 
-## 5-Minute Quick Start
+## Quick Start (User Guide)
 
-### Step 1 — Install
+### Step 1: Install
+
+We rely on `openpyxl` to parse `.xlsx` files, and optionally `rapidfuzz` for fuzzy string matching criteria. Be sure to install with the extras defined:
 
 ```bash
-pip install -e .[excel]   # adds openpyxl, xlrd, rapidfuzz dependencies
+pip install -e .[excel]
 ```
 
-### Step 2 — Describe your template
+### Step 2: Describe Your Template
 
-Suppose your Excel sheet looks like this:
+Suppose you want to extract a salary breakdown table consistently from a series of reports, no matter where it currently resides (top-left, center, bottom-right) on the sheets:
 
 | Dept | Name  | Salary |
 |------|-------|--------|
@@ -29,248 +29,191 @@ Suppose your Excel sheet looks like this:
 | IT   | Bob   | 60000  |
 | HR   | Carol | 55000  |
 
+You can define a blueprint of this expected configuration using the template API:
+
 ```python
 from mypkg.excel_extractor import match_template, Block, Row, Types
 
+# Define the table's footprint
 template = Block(
-    Row(pattern=["Dept", "Name", "Salary"], node_id="header"),  # exact header match
-    Row(pattern=[Types.STR, Types.STR, Types.INT],
-        repeat="+", node_id="data"),                    # one or more data rows
+    # First row: Look for an exact match of these three string headers
+    Row(pattern=["Dept", "Name", "Salary"], node_id="header"),      
+    
+    # Subsequent rows: Must be String, String, Integer. 
+    # repeat="+" implies "at least one data row, keeping consuming as many as valid"
+    Row(pattern=[Types.STR, Types.STR, Types.INT], repeat="+", node_id="data"),
+    
+    # Tag this template block to easily track results
     block_id="salary_table",
 )
 ```
 
-### Step 3 — Run
+### Step 3: Run & Parse Results
+
+Feed the target file and your template block to `match_template` to perform spatial evaluation:
 
 ```python
-# match_template returns list[list[list[BlockMatch]]]
-#   dim 0: per sheet scanned
-#   dim 1: per template provided
-#   dim 2: per match found
+# match_template returns nested lists: list[list[list[BlockMatch]]]
+# Dimensions break down as: [Sheet Scanned] -> [Template Supplied] -> [Match Instance]
 results = match_template("report.xlsx", template)
 
-for block_match in results[0][0]:       # first sheet, first template
-    print(block_match.start, block_match.end)
+sheet_results = results[0]          # Just examine the first Excel sheet
+block_matches = sheet_results[0]    # List of occurrences found for the first template
+
+for block_match in block_matches:
+    print(f"Table found located at: {block_match.start} → {block_match.end}")
+    
+    # Print out all the row data
     for row in block_match.rows:
-        print(row.node_id, row.row, [c.value for c in row.cells])
+        row_idx = row.row
+        values = [cell.value for cell in row.cells]
+
+        if row.node_id == "header":
+            print(f"- [Header at Row {row_idx}] {values}")
+        elif row.node_id == "data":
+            print(f"  [Data at Row {row_idx}]   {values}")
 ```
+
+In just a few lines of readable code, you not only overcome spatial layout shuffling natively, but also naturally weed out dirty formatting thanks to the rigid constraint typing inside your blueprints!
 
 ---
 
-## Cell Type Constants (`Types`)
+## API Reference (Detailed Control)
 
-| Constant | Matches |
-|----------|---------|
-| `Types.STR` | Any non-empty string |
-| `Types.INT` | Integer (e.g. `42`, `-7`) |
-| `Types.POS_INT` | Positive integer |
-| `Types.NEG_INT` | Negative integer |
-| `Types.FLOAT` | Float or integer (e.g. `3.14`, `42`) |
-| `Types.SCIENTIFIC` | Scientific notation (e.g. `1.5e3`) |
-| `Types.PERCENT` | Percentage string (e.g. `12.5%`) |
-| `Types.HEX` | Hexadecimal (e.g. `0xFF`) |
-| `Types.BIN` | Binary (e.g. `0b1010`) |
-| `Types.OCT` | Octal (e.g. `0o17`) |
-| `Types.DATE_ISO` | ISO date `YYYY-MM-DD` |
-| `Types.DATE_SLASH` | Slash date `DD/MM/YYYY` |
-| `Types.TIME_24H` | 24-hour time `HH:MM` |
-| `Types.MERGED` | A cell expanded from a merge region |
-| `Types.ANY` | Any value including empty (wildcard `.*`) |
-| `Types.ANY(n)` | `n` consecutive `Types.ANY` (syntactic sugar) |
-| `Types.EMPTY` | Normalised empty cell (`""`) |
-| `Types.SPACE` | Empty string or whitespace-only |
-| `Types.BLANK` | Same as `SPACE` — any "visually blank" cell |
-| `Types.r("regex")` | Custom regex pattern |
+This portion outlines the breadth of robust APIs supplied by Excel Extractor, giving you fine-tuned capability to wrangle even the messiest layouts.
 
-**Combining types with `|`:**
+### 1. Cell Type Constants (`Types`)
 
-```python
-Types.STR | Types.INT   # matches either a string or an integer
-```
+When populating your `Row` pattern arrays, you can scatter raw matching strings alongside these `Types` properties mapping specific validations:
 
-> [!TIP]
-> Use `Types.BLANK` when you don't care whether a cell is truly absent
-> or just contains whitespace.
+| Constant | Resolves Against |
+|------|---------|
+| `Types.STR` (also as `Types.NONEMPTY`) | Any non-empty string. Fits practically anything containing a visible length. |
+| `Types.INT` | Standard integers (`42`, `-7`) |
+| `Types.POS_INT` / `Types.NEG_INT` | Positives / Negatives strictly |
+| `Types.FLOAT` | Floats (`3.14`) |
+| `Types.NUM` | Any numerical resolution (`INT` or `FLOAT`) |
+| `Types.BOOL` | Boolean-alikes (`true`, `false`, `yes`, `1`, `0`) |
+| `Types.DATE` / `Types.TIME` | Valid Dates, ISO formatted Timestamps, localized dates. |
+| `Types.MERGED` | The physical cell data arose by proxy from a "Merged Cell" structure. |
+| `Types.SPACE` / `Types.BLANK` | Cells containing exclusively whitespace vectors. |
+| `Types.EMPTY` | An exact empty cell footprint post normalisation (`""`). |
+| `Types.ANY` | Absolute wildcard. Eats anything including empties. |
+
+**Advanced Usages:**
+- **Custom Regular Expressions**: Cast bespoke parameters manually using `Types.r(r"^[A-Z]\d{4}$")`.
+- **OR Union Combos**: Combine types via bitwise operator `|`. To check if a cell contains a string OR gets left empty, evaluate `Types.STR | Types.BLANK`.
+- **Sequence Unrolling Trick**: Supply an integer explicitly to `__call__` the structural requirement linearly. `Row(pattern=[Types.ANY(3), Types.INT])` interprets as 3 any-boxes appended sequentially to an integer condition.
 
 ---
 
-## Template Building Blocks
+### 2. Template Build Elements
 
-### `Block` — The top-level unit
+Nodes coalesce into the primary parent `Block`. Use the below schema layouts safely nested:
 
+#### `Row` (Data Rows)
+Fundamental horizontal definition match component.
 ```python
-Block(*children, block_id="my_block", orientation="vertical")
-```
-
-- `orientation="vertical"` (default) — children are `Row` / `EmptyRow` / `Group`
-
-### `Row` — Pattern node
-
-```python
-Row(pattern, repeat=1, node_id=None, normalize=True, min_similarity=None, match_ratio=None)
-```
-
-- `normalize=True` — strips and lowercases string cells before matching.
-- `min_similarity=0.8` (requires `rapidfuzz`) — matches literal string patterns with a similarity ratio >= 0.8.
-- `match_ratio=0.9` — the row matches if >= 90 % of cells pass, even if some fail.
-
-`pattern` is a list where each element is:
-- A **plain string** → matched literally (e.g. `"Dept"`)
-- A **`Types` constant** → matched by type (e.g. `Types.INT`)
-- A **`Types.r(regex)`** → matched by custom regex
-
-### `EmptyRow`
-
-```python
-EmptyRow(repeat=1, allow_whitespace=True, node_id=None)
-```
-
-Matches rows where every cell is empty. `allow_whitespace=True` (default) also accepts cells containing only whitespace.
-
-### `Group` — Repeat a block of nodes together
-
-```python
-Group(children=[Row(...), EmptyRow(...)], repeat="+")
-```
-
-Groups multiple nodes and repeats them as a unit. Useful for tables with repeating section separators.
-
-### `AltNode` — Alternatives (OR semantics)
-
-```python
-Row(pattern=["Header A", Types.INT]) | Row(pattern=["Header B", Types.INT])
-```
-
-Created via the `|` operator. Matches whichever alternative fits.
-
-### `repeat` spec
-
-| Value | Meaning |
-|-------|---------|
-| `1` (default) | Exactly once |
-| `"?"` | 0 or 1 times |
-| `"+"` | 1 or more (greedy) |
-| `"*"` | 0 or more (greedy) |
-| `(2, 5)` | Between 2 and 5 times |
-| `(3, None)` | 3 or more |
-
----
-
-## Working with Results
-
-### Return type
-
-`match_template()` returns `list[list[list[BlockMatch]]]`:
-
-| Dimension | Meaning |
-|-----------|---------|
-| `[i]` | i-th scanned sheet |
-| `[i][j]` | j-th template's matches on sheet i |
-| `[i][j][k]` | k-th block match |
-
-### `BlockMatch`
-
-```python
-block_match.start       # (row, col) — 0-based top-left corner
-block_match.end         # (row, col) — 0-based bottom-right corner
-block_match.rows        # list[RowMatch] — all matched rows
-block_match.block_id    # the block_id you gave the Block
-```
-
-### `RowMatch`
-
-```python
-row.row                 # absolute 0-based row index in the sheet
-row.cells               # list[CellMatch]
-row.node_id             # the node_id you gave the Row
-```
-
-### `CellMatch`
-
-```python
-cell.row                # absolute 0-based row index
-cell.col                # absolute 0-based col index
-cell.value              # normalised string value
-cell.is_merged          # True if this cell was expanded from a merge range
-```
-
----
-
-## `MatchOptions` Reference
-
-```python
-MatchOptions(
-    return_mode = 0,    # 0 = scan all sheets; N > 0 = stop after N sheets with matches
+Row(
+    pattern=["A", Types.INT], # The ordered horizontal list of Types or literals
+    repeat=1,                 # Times it can chain. (ex: "+", "*", tuple params)
+    node_id=None,             # An identifiable label piped backwards after extraction. 
+    normalize=True,           # Strips tails/lowercases inputs to assist strict matching
+    min_similarity=None,      # Provide float (0~1.0) activating fuzzy string proximity checks
+    match_ratio=None          # Threshold float (0~1.0) of cells permitted to fail evaluating
 )
 ```
 
-| `return_mode` | Behaviour |
-|---------------|-----------|
-| `0` | Scan all sheets |
-| `N` (positive int) | Stop scanning after `N` sheets that contain at least one match |
+#### `EmptyRow` (Spacing Definition)
+Provides swift structural gaps mapping equivalents, basically syntactically rolling an entire row of `Types.BLANK`.
+```python
+EmptyRow(repeat=1, node_id=None, allow_whitespace=True)
+```
+
+#### `Group` (Cluster Collections)
+Groupings define cluster loops to enforce layout rules that are repetitive. Perfect for nested data with recurring spacer formats.
+```python
+# Ex: Datasets spanning two rows, recurring repeatedly down the sheet
+Group(children=[
+    Row(pattern=[Types.MERGED, Types.STR], repeat="+"),
+    EmptyRow(repeat=1),
+], repeat="+")
+```
+
+#### `AltNode`（Alternatives / OR Behavior）
+Instantiated purely by applying the `|` operator against variations of `Row`s. Exceedingly powerful if report formats swap minor titles organically.
+```python
+Row(pattern=["A", "B"]) | Row(pattern=["A*", "B*"])
+```
+
+#### Parameterizing `repeat`
+| Input Syntax | Application Directive |
+|----|------|
+| `1` (default) | Distinctly exactly 1 match needed. |
+| `"?"` | 0 or 1 instances (optional match tier). |
+| `"+"` | 1 or greater iterations (will greedy-eat down). |
+| `"*"` | 0 or greater iterations (will greedy-eat down). |
+| `(2, 5)` | Mandated min of 2 bounding max range against 5 matches. |
+| `(3, None)` | Min 3 required, open max. |
 
 ---
 
-## Advanced: Multi-Sheet Scanning
+### 3. Emitted Output Map Mechanics
 
+As shown earlier, referencing `match_template` kicks out a tree branching through properties of specific matches:
+
+#### `BlockMatch` (The Holistic Payload)
 ```python
-# Scan all sheets (default)
-results = match_template("report.xlsx", template, sheet=None)
+block.start       # (row, col) — 0-based Top-Left matrix start tuple
+block.end         # (row, col) — 0-based Bottom-Right matrix limit tuple
+block.rows        # list[RowMatch] — List array housing the subrow logic chunks
+block.block_id    # string — The 'block_id' supplied to the parent Block
+```
 
-# Scan specific sheets by name or 0-based index
-results = match_template("report.xlsx", template, sheet=["Sheet1", "Sheet3"])
-results = match_template("report.xlsx", template, sheet=0)
+#### `RowMatch` (Iterated Row Item)
+```python
+row.row                 # 0-based index denoting vertical depth context inside the sheet
+row.cells               # list[CellMatch] — Iteratable lists of cells
+row.node_id             # string — Mapped label applied at initialization
+```
+
+#### `CellMatch` (Extracted Property Leaf)
+```python
+cell.row                # Absolute 0-based vertical location
+cell.col                # Absolute 0-based horizontal position
+cell.value              # String literal interpreted back resolving constraints
+cell.is_merged          # Boolean informing whether span expansion inflated this cell
 ```
 
 ---
 
-## Advanced: Multi-Template Composition
+### 4. Extra Search Optimizations & Dual Parsing
 
-Pass a list of Block templates to scan for multiple patterns in one pass:
-
+#### Limiting Iteration Time `MatchOptions`
+Sometimes scanning a workbook 50 times deep for specific data when the data will only show up 'once' represents a tremendous waste of CPU processing. 
 ```python
-header_block = Block(Row(pattern=["Report", "Date"]), block_id="header")
-data_block   = Block(
-    Row(pattern=["Dept", "Name", "Salary"]),
-    Row(pattern=[Types.STR, Types.STR, Types.INT], repeat="+"),
-    block_id="data_table",
-)
-
-results = match_template("report.xlsx", [header_block, data_block])
-# results[sheet_idx][0] → header_block matches
-# results[sheet_idx][1] → data_block matches
-```
-
----
-
-## Complete Example
-
-```python
-from mypkg.excel_extractor import (
-    match_template, Block, Row, EmptyRow, Group, Types, MatchOptions,
-)
-
-# Template: grouped payroll table with merged dept cells, groups separated by blank rows
-template = Block(
-    Row(pattern=["Dept", "Name", "Salary"], node_id="header", min_similarity=0.85),
-    Group(children=[
-        Row(pattern=[Types.MERGED, Types.STR, Types.INT], repeat="+", node_id="data"),
-        EmptyRow(repeat="?"),
-    ], repeat="+"),
-    block_id="payroll",
-)
+from mypkg.excel_extractor import MatchOptions
 
 results = match_template(
-    "payroll.xlsx",
+    "report.xlsx", 
     template,
-    sheet=None,                          # scan all sheets
+    sheet=["Sheet1", "Sheet3"], # Force scans strictly inside these sheets
+    options=MatchOptions(
+        # Halt execution abruptly the moment ANY block hit happens once per workbook run
+        return_mode=1 
+    )
 )
+```
 
-for sheet_results in results:
-    for block_match in sheet_results[0]:   # first (only) template
-        print(f"Found at {block_match.start} → {block_match.end}")
-        for row in block_match.rows:
-            if row.node_id == "data":
-                dept, name, salary = [c.value for c in row.cells]
-                print(f"  Row {row.row}: {dept} | {name} | {salary}")
+#### Template Injection Overloading
+When digging for isolated tables scattered simultaneously in identical docs, stack Blocks into a collection and map it jointly preventing duplicate filesystem I/O operations.
+```python
+header_block = Block(Row(pattern=["Report", "Date"]), block_id="header")
+data_block   = Block(Row(pattern=["Dept", "Name", "Salary"]), block_id="data_table")
+
+results = match_template("report.xlsx", [header_block, data_block])
+
+# Returned hierarchy indexes dynamically trace back matching indexes.
+# results[sheet_idx][0] → Output targets 'header_block' hits
+# results[sheet_idx][1] → Output targets 'data_block' hits
 ```

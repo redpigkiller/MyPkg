@@ -93,7 +93,7 @@ class TestLinkingAndDetach:
         reg1 = var("REG1", 16, 0x2)
         pad = const(0, 4)
         sram = var("SRAM", 12)
-        
+
         # LINK: reg0[3:0] (4) + pad (4) + reg1[3:0] (4) = 12 bits
         sram.link(reg0[3:0], pad, reg1[3:0])
         assert sram.is_linked
@@ -105,7 +105,7 @@ class TestLinkingAndDetach:
         reg1 = var("REG1", 16)
         sram = var("SRAM", 8)
         sram.link(reg0[3:0], reg1[3:0])
-        
+
         sram.value = 0xAB
         assert reg0.value == 0xA
         assert reg1.value == 0xB
@@ -114,12 +114,12 @@ class TestLinkingAndDetach:
         reg = var("REG", 8, 0x42)
         sram = var("SRAM", 8)
         sram.link(reg)
-        
+
         assert sram.value == 0x42
         sram.detach()
         assert not sram.is_linked
         assert sram.value == 0x42
-        
+
         # Changing source no longer affects sram
         reg.value = 0xFF
         assert sram.value == 0x42
@@ -180,7 +180,7 @@ class TestLogicAndShiftOps:
     def test_slice_ops(self):
         a = var("A", 16, 0xABCD)
         assert (a[7:0] & 0x0F).value_eq(0x0D)
-        assert (~a[3:0]).value_eq(0x02) # ~0xD = ~1101 = 0010 = 0x2
+        assert (~a[3:0]).value_eq(0x02)  # ~0xD = ~1101 = 0010 = 0x2
         assert (a[7:0] << 4).value_eq(0xD0)
 
 
@@ -194,14 +194,14 @@ class TestEvaluation:
         reg0 = var("REG0", 16, 0x5)
         reg1 = var("REG1", 16, 0x2)
         sram = concat("SRAM", reg0[3:0], const(0, 4), reg1[3:0])
-        
+
         # True value is 0x502
         assert sram.value == 0x502
-        
+
         # Evaluate with hypothetical values
         simulated = sram.eval({"REG0": 0xA, "REG1": 0x3})
         assert simulated == 0xA03
-        
+
         # Real values remain unchanged
         assert sram.value == 0x502
 
@@ -231,7 +231,7 @@ class TestEqualityAndHashing:
         a = var("A", 8, 0x42)
         assert a.value_eq(0x42)
         assert not a.value_eq(0x43)
-        
+
         b = var("B", 8, 0x42)
         assert a.value_eq(b)
 
@@ -294,7 +294,7 @@ class TestExceptionsAndWarnings:
         reg = var("R", 8)
         with pytest.raises(IndexError, match="out of bounds"):
             reg[2:5]  # high < low is technically valid in syntax but we check parent bounds in MapBV logic
-            
+
         with pytest.raises(IndexError, match="out of bounds"):
             reg[8:0]  # out of 8-bit width range (high=7 max)
 
