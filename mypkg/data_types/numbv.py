@@ -541,21 +541,21 @@ class NumBV:
 
             np.sin(a.cast(16, 14))
         """
-        # Resolve all inputs to float arrays
+        # Resolve all inputs to float arrays (ufuncs require float64).
         float_inputs = []
         ref = None
         for inp in inputs:
             if isinstance(inp, NumBV):
                 if ref is None:
                     ref = inp
-                float_inputs.append(_raw_to_float(inp._raw, inp._frac))
+                # Use precomputed _scale — avoids recomputing (1 << frac)
+                float_inputs.append(inp._raw.astype(np.float64) / inp._scale)
             else:
                 float_inputs.append(np.asarray(inp, dtype=np.float64))
 
         if ref is None:
             return NotImplemented
 
-        # Execute ufunc on float arrays
         result = getattr(ufunc, method)(*float_inputs, **kwargs)
 
         # Some ufuncs return multiple outputs (e.g. np.modf, np.frexp).
@@ -565,16 +565,10 @@ class NumBV:
                 for r in result
             )
 
-        # Build a new NumBV in ref's format — the constructor calls _quantize internally.
-        out = NumBV(
-            result,
-            ref._width,
-            ref._frac,
-            ref._signed,
-            ref._overflow,
-            ref._rounding,
-        )
-        _precision_loss_check(result, out._raw, ref._width, ref._frac)
+        out = NumBV(result, ref._width, ref._frac, ref._signed, ref._overflow, ref._rounding)
+        # Skip the precision check entirely when silent (default) — no function call overhead.
+        if config.on_precision_loss != "silent":
+            _precision_loss_check(result, out._raw, ref._width, ref._frac)
         return out
 
     # -- array indexing ----------------------------------------------------
@@ -701,13 +695,10 @@ class NumBV:
         """
         s = signed if signed is not None else self._signed
         of = overflow if overflow is not None else self._overflow
+        # Convert via float using precomputed _scale.
         return NumBV(
-            _raw_to_float(self._raw, self._frac),
-            width,
-            frac,
-            s,
-            of,
-            self._rounding,
+            self._raw.astype(np.float64) / self._scale,
+            width, frac, s, of, self._rounding,
         )
 
     def copy(self) -> "NumBV":
