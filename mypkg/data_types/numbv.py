@@ -33,11 +33,47 @@ Global config::
 
 from __future__ import annotations
 
+import os
 import warnings
-from typing import Literal
+from typing import Literal, Callable, Any
 
 import numpy as np
 
+
+# ---------------------------------------------------------------------------
+# Optional Numba JIT Support
+# ---------------------------------------------------------------------------
+
+_DISABLE_JIT = os.environ.get("NUMBV_DISABLE_JIT", "0") == "1"
+
+try:
+    if _DISABLE_JIT:
+        # Manually trigger the fallback if the user disabled JIT
+        raise ImportError
+    
+    from numba import njit
+    HAS_NUMBA = True
+
+except ImportError:
+    HAS_NUMBA = False
+    
+    # Define a dummy njit that matches the signature of the real one.
+    # It simply returns the function unchanged.
+    def njit(*args: Any, **kwargs: Any) -> Callable:
+        """Fallback: No-op decorator when Numba is missing."""
+        if len(args) == 1 and len(kwargs) == 0 and callable(args[0]):
+            return args[0]  # Used as @njit
+        
+        def decorator(func: Callable) -> Callable:
+            return func     # Used as @njit(cache=True)
+        return decorator
+
+def optional_jit(**numba_kwargs: Any) -> Callable:
+    """
+    Applies @njit with kwargs if Numba is available, 
+    otherwise returns a no-op decorator.
+    """
+    return njit(**numba_kwargs)
 
 # ---------------------------------------------------------------------------
 # Config
@@ -106,18 +142,18 @@ def _precision_loss_check(
 # depend on any class state and can be decorated with @numba.njit in the
 # future by changing `overflow: str` → `overflow_is_wrap: bool`.
 
-
+@optional_jit(cache=True)
 def _clip(
     raw: np.ndarray,
     lo: int,
     hi: int,
     mask: int,
     wrap_offset: int,
-    overflow: str,
+    is_wrap: bool,
     signed: bool,
 ) -> np.ndarray:
     """Apply overflow handling (saturate or wrap) to raw int64 values."""
-    if overflow == "wrap":
+    if is_wrap:
         raw = raw & mask
         if signed:
             raw = np.where(raw > hi, raw - wrap_offset, raw)
@@ -125,7 +161,7 @@ def _clip(
         raw = np.clip(raw, lo, hi)
     return raw
 
-
+@optional_jit(cache=True)
 def _raw_add(
     a: np.ndarray, b: np.ndarray,
     lo: int, hi: int, mask: int, wrap_offset: int,
@@ -134,7 +170,7 @@ def _raw_add(
     """Add two same-format raw arrays. No float conversion."""
     return _clip(a + b, lo, hi, mask, wrap_offset, overflow, signed)
 
-
+@optional_jit(cache=True)
 def _raw_sub(
     a: np.ndarray, b: np.ndarray,
     lo: int, hi: int, mask: int, wrap_offset: int,
@@ -143,29 +179,29 @@ def _raw_sub(
     """Subtract two same-format raw arrays. No float conversion."""
     return _clip(a - b, lo, hi, mask, wrap_offset, overflow, signed)
 
-
+@optional_jit(cache=True)
 def _raw_mul(
     a: np.ndarray, b: np.ndarray,
-    frac: int, rounding: str,
+    frac: int, is_round: bool,
     lo: int, hi: int, mask: int, wrap_offset: int,
-    overflow: str, signed: bool,
+    is_wrap: bool, signed: bool,
 ) -> np.ndarray:
     """Multiply two same-format raw arrays.
 
     ``(a * b) >> frac`` with rounding, then overflow clip.
     """
-    product = a.astype(np.int64) * b.astype(np.int64)
-    if rounding == "round" and frac > 0:
+    product = a * b
+    if is_round and frac > 0:
         product += 1 << (frac - 1)
     result = product >> frac
-    return _clip(result, lo, hi, mask, wrap_offset, overflow, signed)
+    return _clip(result, lo, hi, mask, wrap_offset, is_wrap, signed)
 
-
+@optional_jit(cache=True)
 def _raw_div(
     a: np.ndarray, b: np.ndarray,
-    frac: int, rounding: str,
+    frac: int, is_round: bool,
     lo: int, hi: int, mask: int, wrap_offset: int,
-    overflow: str, signed: bool,
+    is_wrap: bool, signed: bool,
 ) -> np.ndarray:
     """Divide two same-format raw arrays.
 
@@ -174,24 +210,21 @@ def _raw_div(
     # Guard against division by zero — replace 0 with 1 (result will be
     # clipped to lo/hi by overflow handling anyway).
     safe_b = np.where(b == 0, np.int64(1), b)
-    numerator = a.astype(np.int64) << frac
-    if rounding == "round":
-        # round half-up: add half of |b| before dividing
+    numerator = a << frac
+    if is_round:
         half_b = np.abs(safe_b) >> 1
         numerator = np.where(numerator >= 0, numerator + half_b, numerator - half_b)
-    # Use floor division for truncation toward negative infinity,
-    # matching hardware arithmetic right-shift semantics.
     result = np.where(b == 0, np.where(a >= 0, np.int64(hi), np.int64(lo)), numerator // safe_b)
-    return _clip(result, lo, hi, mask, wrap_offset, overflow, signed)
+    return _clip(result, lo, hi, mask, wrap_offset, is_wrap, signed)
 
-
+@optional_jit(cache=True)
 def _raw_neg(
     a: np.ndarray,
     lo: int, hi: int, mask: int, wrap_offset: int,
-    overflow: str, signed: bool,
+    is_wrap: bool, signed: bool,
 ) -> np.ndarray:
     """Negate raw array. No float conversion."""
-    return _clip(-a, lo, hi, mask, wrap_offset, overflow, signed)
+    return _clip(-a, lo, hi, mask, wrap_offset, is_wrap, signed)
 
 
 # ---------------------------------------------------------------------------
@@ -260,11 +293,11 @@ class NumBV:
         )
 
         # int64 ndarray, shape () or (n,)
-        self._raw: np.ndarray = self._quantize(raw)
+        self._raw: np.ndarray[np.int64] = self._quantize(raw)
 
     # -- internal helpers --------------------------------------------------
 
-    def _quantize(self, values: np.ndarray|int|float) -> np.ndarray:
+    def _quantize(self, values: np.ndarray|int|float) -> np.ndarray[np.int64]:
         """Quantize real-valued *values* into a fixed-point raw integer array.
 
         Returns a numpy int64 array of raw (signed two's complement) integers.
@@ -347,16 +380,14 @@ class NumBV:
     # -- properties --------------------------------------------------------
 
     @property
-    def val(self) -> float | np.ndarray:
+    def val(self) -> np.ndarray[np.float64]:
         """Current value(s). ``float`` for scalar, ``np.ndarray`` for array."""
-        v = self._raw.astype(np.float64) / self._scale
-        return float(v) if self._is_scalar() else v
+        return self._raw.astype(np.float64) / self._scale
 
     @property
-    def bits(self) -> int | np.ndarray:
+    def bits(self) -> np.ndarray[np.int64]:
         """Unsigned bit pattern(s). ``int`` for scalar, ``np.ndarray`` for array."""
-        v = self._raw.astype(np.int64) & self._mask
-        return int(v) if self._is_scalar() else v
+        return self._raw.astype(np.int64) & self._mask
 
     @property
     def hex(self) -> str | list[str]:
@@ -408,9 +439,10 @@ class NumBV:
     # -- arithmetic operators (raw int64 fast path) ------------------------
 
     def _arith_args(self):
-        """Shorthand for the overflow-handling arguments."""
+        """Shorthand for the overflow-handling arguments.
+        Converts string to boolean once per operation for Numba."""
         return (self._lo, self._hi, self._mask, self._wrap_offset,
-                self._overflow, self._signed)
+                self._overflow == "wrap", self._signed)
 
     def __add__(self, other: NumBV | int | float) -> NumBV:
         return NumBV._from_raw(
@@ -439,28 +471,28 @@ class NumBV:
     def __mul__(self, other: NumBV | int | float) -> NumBV:
         return NumBV._from_raw(
             _raw_mul(self._raw, self._other_raw(other),
-                     self._frac, self._rounding, *self._arith_args()),
+                     self._frac, self._rounding == "round", *self._arith_args()),
             self,
         )
 
     def __rmul__(self, other: NumBV | int | float) -> NumBV:
         return NumBV._from_raw(
             _raw_mul(self._other_raw(other), self._raw,
-                     self._frac, self._rounding, *self._arith_args()),
+                     self._frac, self._rounding == "round", *self._arith_args()),
             self,
         )
 
     def __truediv__(self, other: NumBV | int | float) -> NumBV:
         return NumBV._from_raw(
             _raw_div(self._raw, self._other_raw(other),
-                     self._frac, self._rounding, *self._arith_args()),
+                     self._frac, self._rounding == "round", *self._arith_args()),
             self,
         )
 
     def __rtruediv__(self, other: int | float) -> NumBV:
         return NumBV._from_raw(
             _raw_div(self._other_raw(other), self._raw,
-                     self._frac, self._rounding, *self._arith_args()),
+                     self._frac, self._rounding == "round", *self._arith_args()),
             self,
         )
 
@@ -488,12 +520,12 @@ class NumBV:
 
     def __imul__(self, other: NumBV | int | float) -> NumBV:
         self._raw = _raw_mul(self._raw, self._other_raw(other),
-                             self._frac, self._rounding, *self._arith_args())
+                             self._frac, self._rounding == "round", *self._arith_args())
         return self
 
     def __itruediv__(self, other: NumBV | int | float) -> NumBV:
         self._raw = _raw_div(self._raw, self._other_raw(other),
-                             self._frac, self._rounding, *self._arith_args())
+                             self._frac, self._rounding == "round", *self._arith_args())
         return self
 
     # -- comparison operators (raw int64 fast path) ------------------------
