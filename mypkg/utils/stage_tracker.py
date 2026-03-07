@@ -143,10 +143,17 @@ class StageTracker:
         self.console_enabled = True
         self.file_enabled = True
 
+        self._entered = False
+
         self.add_console_handler()
 
     def __repr__(self) -> str:
         return f"<StageTracker mode={self._mode.value} stages={self._stage_order}>"
+
+    def _check_entered(self) -> None:
+        """Ensure StageTracker is used within a context manager."""
+        if not self._entered:
+            raise UsageError("StageTracker must be used within a 'with' statement (e.g., `with StageTracker() as t:`)")
 
     # ------------------------------------------------
     # thread-local stage
@@ -201,6 +208,7 @@ class StageTracker:
     # flat mode
     def begin_stage(self, name: str) -> None:
         """Begin a new stage in flat mode."""
+        self._check_entered()
         name = self._make_stage_name(name)
 
         if self._mode != TrackerMode.FLAT:
@@ -224,6 +232,7 @@ class StageTracker:
     @contextmanager
     def stage(self, name: str):
         """Context manager for entering a stage."""
+        self._check_entered()
         name = self._make_stage_name(name)
 
         if self._mode != TrackerMode.CONTEXT:
@@ -266,6 +275,7 @@ class StageTracker:
 
     def checkpoint(self) -> None:
         """Stop execution if the current stage has accumulated any errors."""
+        self._check_entered()
         stage = self.current_stage
         if stage:
             self._check_stage_health(stage)
@@ -275,6 +285,7 @@ class StageTracker:
     # ------------------------------------------------
 
     def _log(self, level: ErrorLevel, msg: str, track: bool, **kwargs):
+        self._check_entered()
         stage = self.current_stage or "System"
 
         extra = dict(kwargs.pop("extra", {}))
@@ -380,6 +391,7 @@ class StageTracker:
 
     def get_issues(self, stage: str | None = None, level: ErrorLevel | str | list | None = None) -> list[Issue]:
         """Get accumulated issues, optionally filtered by stage or level."""
+        self._check_entered()
         with self._issues_lock:
             if stage:
                 issues = list(self._issues.get(stage, []))
@@ -400,6 +412,7 @@ class StageTracker:
     
     def clear_issues(self):
         """Clear all tracking data and reset state."""
+        self._check_entered()
         with self._issues_lock:
             self._issues.clear()
             self._stage_order.clear()
@@ -512,6 +525,7 @@ class StageTracker:
     # ------------------------------------------------
 
     def __enter__(self):
+        self._entered = True
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):

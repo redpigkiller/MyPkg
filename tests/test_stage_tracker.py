@@ -137,6 +137,7 @@ def test_duplicate_stage_name():
 
 def test_issue_querying():
     t = StageTracker(mode="flat")
+    t._entered = True # Bypass entered check for explicit testing
     t.begin_stage("A")
     t.debug("d1", track=True)
     t.info("i1", track=True)
@@ -204,6 +205,7 @@ def thread_worker(tracker, thread_name, raises=False):
 
 def test_threading_isolation():
     tracker = StageTracker(mode="flat")
+    tracker._entered = True # Bypass check for multi-thread testing
     
     t1 = threading.Thread(target=thread_worker, args=(tracker, "T1", False), name="T1")
     t2 = threading.Thread(target=thread_worker, args=(tracker, "T2", True), name="T2")
