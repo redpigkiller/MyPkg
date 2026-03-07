@@ -1,7 +1,7 @@
 """MyPkg — A collection of utilities for IC design & verification."""
 
 from mypkg.data_types.mapbv import MapBV, MapBVExpr, const, var, concat
-from mypkg.scheduler import Scheduler, Job, CmdJob
+from mypkg.scheduler import JobManager, Job, CmdJob, FuncJob
 
 try:
     from mypkg.cfg import CFG, BasicBlock, NaturalLoop
@@ -43,7 +43,7 @@ __all__ = [
     "NumBV",
     "NumBVArray",
     # scheduler
-    "Scheduler", "Job", "CmdJob",
+    "JobManager", "Job", "CmdJob", "FuncJob",
     # excel
     "match_template",
     "Block", "Row", "EmptyRow", "Group",

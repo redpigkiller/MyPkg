@@ -1,17 +1,15 @@
-"""scheduler sub-package — cross-platform job scheduling."""
+"""scheduler sub-package — minimal, robust job scheduling."""
 
 from mypkg.scheduler.job import (
     Job,
-    JobSnapshot,
-    JobUpdate,
+    JobStatus,
     PENDING, RUNNING, DONE, FAILED, CANCELLED,
 )
 from mypkg.scheduler.cmd_job import CmdJob
-from mypkg.scheduler.scheduler import Scheduler
-from mypkg.scheduler.types import Event, Resource
+from mypkg.scheduler.func_job import FuncJob
+from mypkg.scheduler.manager import JobManager
 
 __all__ = [
-    "Scheduler", "Job", "CmdJob", "JobSnapshot", "JobUpdate",
-    "PENDING", "RUNNING", "DONE", "FAILED", "CANCELLED",
-    "Event", "Resource",
+    "JobManager", "Job", "CmdJob", "FuncJob",
+    "JobStatus", "PENDING", "RUNNING", "DONE", "FAILED", "CANCELLED",
 ]
