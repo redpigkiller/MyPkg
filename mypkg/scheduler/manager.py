@@ -100,8 +100,10 @@ class JobManager:
             self._paused = False
             self._cond.notify_all()
 
-    def wait(self, target_id: Optional[uuid.UUID] = None, timeout: Optional[float] = None) -> bool:
+    def wait(self, target_id: Optional[Union[str, uuid.UUID]] = None, timeout: Optional[float] = None) -> bool:
         """Wait until all jobs (or a target job) finish."""
+        if isinstance(target_id, str):
+            target_id = uuid.UUID(target_id)
         deadline = time.monotonic() + timeout if timeout is not None else None
 
         def _is_done() -> bool:
@@ -142,6 +144,8 @@ class JobManager:
                 # If dynamic Callable, we trust it or let it fail at runtime
 
         with self._lock:
+            if getattr(job, '_on_state_change_cb', None) is not None:
+                raise ValueError(f"Job with ID {job.id} is already managed by a JobManager.")
             if any(j.id == job.id for j in self._jobs):
                 raise ValueError(f"Job with ID {job.id} is already in the manager.")
             
@@ -155,14 +159,18 @@ class JobManager:
             self._cleanup_history()
             self._cond.notify_all()
 
-    def get(self, target_id: uuid.UUID) -> Optional[Job]:
+    def get(self, target_id: Union[str, uuid.UUID]) -> Optional[Job]:
+        if isinstance(target_id, str):
+            target_id = uuid.UUID(target_id)
         with self._lock:
             for j in self._jobs:
                 if j.id == target_id:
                     return j
         return None
 
-    def cancel(self, target_id: uuid.UUID) -> None:
+    def cancel(self, target_id: Union[str, uuid.UUID]) -> None:
+        if isinstance(target_id, str):
+            target_id = uuid.UUID(target_id)
         j = self.get(target_id)
         if j:
             j.cancel()
@@ -209,6 +217,10 @@ class JobManager:
                     self._active_workers += 1
                     
                     with ready_job._lock:
+                        if ready_job._status != PENDING:
+                            self._release_resources(ready_job)
+                            self._active_workers -= 1
+                            continue
                         ready_job._status = RUNNING
                         ready_job._start_time = time.monotonic()
                     
@@ -246,10 +258,9 @@ class JobManager:
         for j in pending_obs:
             can_fit = True
             for res_name, req_val in j.resources.items():
-                v = req_val() if callable(req_val) else req_val
                 limit = capacities.get(res_name, 0)
                 used = self._used_resources.get(res_name, 0)
-                if used + v > limit:
+                if used + req_val > limit:
                     can_fit = False
                     break
             if can_fit:
@@ -259,14 +270,12 @@ class JobManager:
 
     def _acquire_resources(self, job: Job) -> None:
         for res_name, req_val in job.resources.items():
-            v = req_val() if callable(req_val) else req_val
-            self._used_resources[res_name] = self._used_resources.get(res_name, 0) + v
+            self._used_resources[res_name] = self._used_resources.get(res_name, 0) + req_val
 
     def _release_resources(self, job: Job) -> None:
         with self._lock:
             for res_name, req_val in job.resources.items():
-                v = req_val() if callable(req_val) else req_val
-                self._used_resources[res_name] = max(0, self._used_resources.get(res_name, 0) - v)
+                self._used_resources[res_name] = max(0, self._used_resources.get(res_name, 0) - req_val)
             self._cond.notify_all()
 
     def _cleanup_history(self) -> None:
@@ -287,46 +296,47 @@ class JobManager:
         """Worker thread entrypoint for running constraints, retry logic, and cleanup."""
         attempt = job._retry_count
 
-        while True:
-            log_file = None
-            if self._log_dir:
-                self._log_dir.mkdir(parents=True, exist_ok=True)
-                path = self._log_dir / f"{job.name}_{job.id.hex[:8]}.log"
-                log_file = open(path, "a", encoding="utf-8")
+        log_file = None
+        if self._log_dir:
+            self._log_dir.mkdir(parents=True, exist_ok=True)
+            path = self._log_dir / f"{job.name}_{job.id.hex[:8]}.log"
+            log_file = open(path, "a", encoding="utf-8")
 
-            # Execute
-            try:
-                job._execute(log_file)
-            except Exception as e:
-                with job._lock:
-                    if job._status == RUNNING:
-                        job._status = FAILED
-                        job._error = str(e)
-            finally:
-                if log_file:
-                    log_file.close()
-
+        # Execute
+        try:
+            job._execute(log_file)
+        except Exception as e:
             with job._lock:
                 if job._status == RUNNING:
-                    from .cmd_job import CmdJob
-                    if job._error is not None or (isinstance(job, CmdJob) and getattr(job, '_result', 0) != 0):
-                        job._status = FAILED
-                    else:
-                        job._status = DONE
+                    job._status = FAILED
+                    job._error = str(e)
+        finally:
+            if log_file:
+                log_file.close()
+
+        with job._lock:
+            if job._status == RUNNING:
+                if job._error is not None:
+                    job._status = FAILED
+                else:
+                    job._status = DONE
+        
+        # Retry evaluation
+        if job.status == FAILED and attempt < job.max_retries and not job.is_cancelled:
+            attempt += 1
+            with job._lock:
+                job._status = PENDING
+                job._retry_count = attempt
+                job._result = None
+                job._error = None
+                job._output_buffer.clear()
             
-            # Retry evaluation
-            if job.status == FAILED and attempt < job.max_retries and not job.is_cancelled:
-                attempt += 1
-                with job._lock:
-                    job._status = RUNNING
-                    job._retry_count = attempt
-                    job._result = None
-                    job._error = None
-                    job._output_buffer.clear()
-                time.sleep(0.1) # backoff
-                continue
-                
-            break 
+            self._release_resources(job)
+            with self._lock:
+                self._active_workers -= 1
+                self._cond.notify_all()
+            return # Exit wrapper, let _execute_loop pick it up again
+            
             
         with job._lock:
             job._end_time = time.monotonic()

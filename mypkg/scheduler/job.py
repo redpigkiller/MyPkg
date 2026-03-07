@@ -38,8 +38,8 @@ class Job(ABC):
         *,
         priority: int = 0,
         max_retries: int = 0,
-        resources: Optional[Dict[str, Union[int, Callable[[], int]]]] = None,
-        cache_output_len: int = 10_000,
+        resources: Optional[Dict[str, int]] = None,
+        max_log_lines: int = 10_000,
     ) -> None:
         self._id: uuid.UUID = uuid.uuid4()
         self._name: str = name
@@ -47,7 +47,7 @@ class Job(ABC):
         # Settings
         self.priority: int = priority
         self.max_retries: int = max_retries
-        self.resources: Dict[str, Union[int, Callable[[], int]]] = resources or {}
+        self.resources: Dict[str, int] = resources or {}
         
         # State
         self._status: JobStatus = PENDING
@@ -63,7 +63,7 @@ class Job(ABC):
         self._cancel_event = threading.Event()
         
         # Logs
-        self._output_buffer: deque[str] = deque(maxlen=cache_output_len)
+        self._output_buffer: deque[str] = deque(maxlen=max_log_lines)
         
         # Callbacks (internal & external)
         self._on_state_change_cb: Optional[Callable[[], None]] = None

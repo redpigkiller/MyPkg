@@ -28,9 +28,10 @@ class CmdJob(Job):
         env: Optional[Dict[str, str]] = None,
         priority: int = 0,
         max_retries: int = 0,
-        resources: Optional[Dict[str, Union[int, Callable[[], int]]]] = None,
+        resources: Optional[Dict[str, int]] = None,
+        max_log_lines: int = 10_000,
     ) -> None:
-        super().__init__(name, priority=priority, max_retries=max_retries, resources=resources)
+        super().__init__(name, priority=priority, max_retries=max_retries, resources=resources, max_log_lines=max_log_lines)
         self.cmd = cmd
         self.cwd = cwd
         self.env = env
