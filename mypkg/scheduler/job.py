@@ -14,7 +14,7 @@ import time
 import uuid
 from abc import ABC, abstractmethod
 from collections import deque
-from typing import Any, Callable, Dict, List, Literal, Optional, Pattern, Union
+from typing import Any, Callable, Literal, Pattern
 
 JobStatus = Literal["pending", "running", "done", "failed", "cancelled"]
 
@@ -38,7 +38,7 @@ class Job(ABC):
         *,
         priority: int = 0,
         max_retries: int = 0,
-        resources: Optional[Dict[str, int]] = None,
+        resources: dict[str, int] | None = None,
         max_log_lines: int = 10_000,
     ) -> None:
         self._id: uuid.UUID = uuid.uuid4()
@@ -47,15 +47,15 @@ class Job(ABC):
         # Settings
         self.priority: int = priority
         self.max_retries: int = max_retries
-        self.resources: Dict[str, int] = resources or {}
+        self.resources: dict[str, int] = resources or {}
         
         # State
         self._status: JobStatus = PENDING
-        self._progress: Optional[float] = None
+        self._progress: float | None = None
         self._result: Any = None
-        self._error: Optional[str] = None
-        self._start_time: Optional[float] = None
-        self._end_time: Optional[float] = None
+        self._error: str | None = None
+        self._start_time: float | None = None
+        self._end_time: float | None = None
         self._retry_count: int = 0
         
         # Threading & Control
@@ -66,13 +66,13 @@ class Job(ABC):
         self._output_buffer: deque[str] = deque(maxlen=max_log_lines)
         
         # Callbacks (internal & external)
-        self._on_state_change_cb: Optional[Callable[[], None]] = None
-        self._on_log_cbs: List[Callable[['Job', str], None]] = []
-        self._on_done_cbs: List[Callable[['Job'], None]] = []
-        self._on_fail_cbs: List[Callable[['Job', str], None]] = []
+        self._on_state_change_cb: Callable[[], None] | None = None
+        self._on_log_cbs: list[Callable[['Job', str], None]] = []
+        self._on_done_cbs: list[Callable[['Job'], None]] = []
+        self._on_fail_cbs: list[Callable[['Job', str], None]] = []
         
         # Watchers: pattern regex -> user callback(job, match)
-        self._watchers: List[tuple[Pattern[str], Callable[['Job', re.Match], None]]] = []
+        self._watchers: list[tuple[Pattern[str], Callable[['Job', re.Match], None]]] = []
 
     # ------------------------------------------------------------------
     # Properties
@@ -91,7 +91,7 @@ class Job(ABC):
             return self._status
 
     @property
-    def progress(self) -> Optional[float]:
+    def progress(self) -> float | None:
         with self._lock:
             return self._progress
 
@@ -101,17 +101,17 @@ class Job(ABC):
             return self._result
 
     @property
-    def error(self) -> Optional[str]:
+    def error(self) -> str | None:
         with self._lock:
             return self._error
 
     @property
-    def start_time(self) -> Optional[float]:
+    def start_time(self) -> float | None:
         with self._lock:
             return self._start_time
 
     @property
-    def end_time(self) -> Optional[float]:
+    def end_time(self) -> float | None:
         with self._lock:
             return self._end_time
 
@@ -143,7 +143,7 @@ class Job(ABC):
         self.kill()
         self._notify_state_change()
 
-    def retry(self) -> None:
+    def _reset(self) -> None:
         """Reset the job state and retry count to run again."""
         with self._lock:
             self._status = PENDING
@@ -171,12 +171,12 @@ class Job(ABC):
     # ------------------------------------------------------------------
     # Data & Observability
     # ------------------------------------------------------------------
-    def logs(self) -> List[str]:
+    def logs(self) -> list[str]:
         """Return all captured log lines."""
         with self._lock:
             return list(self._output_buffer)
 
-    def tail(self, n: int = 20) -> List[str]:
+    def tail(self, n: int = 20) -> list[str]:
         """Return the last *n* lines of captured output."""
         with self._lock:
             return list(self._output_buffer)[-n:]
@@ -191,7 +191,7 @@ class Job(ABC):
         for cb in cbs:
             try:
                 cb(self, line)
-            except Exception:
+            except (TypeError, ValueError, AttributeError):
                 pass
                 
         for pattern, wcb in watchers:
@@ -199,7 +199,7 @@ class Job(ABC):
                 m = pattern.search(line)
                 if m:
                     wcb(self, m)
-            except Exception:
+            except (TypeError, ValueError, AttributeError):
                 pass
 
     # ------------------------------------------------------------------
@@ -217,7 +217,7 @@ class Job(ABC):
         with self._lock:
             self._on_fail_cbs.append(cb)
 
-    def watch(self, pattern: Union[str, Pattern[str]], cb: Callable[['Job', re.Match], None]) -> None:
+    def watch(self, pattern: str | Pattern[str], cb: Callable[['Job', re.Match], None]) -> None:
         if isinstance(pattern, str):
             pattern = re.compile(pattern)
         with self._lock:
@@ -236,7 +236,7 @@ class Job(ABC):
         cb = None
         with self._lock:
             cb = self._on_state_change_cb
-        if cb:
+        if cb is not None:
             cb()
 
     def __repr__(self) -> str:

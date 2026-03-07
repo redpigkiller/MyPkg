@@ -129,6 +129,7 @@ manager.stop()
 | `.cancel(target_id)`| Forces a specific job (by string UUID or UUID object) to `CANCELLED` and kills its process. |
 | `.wait(target_id=None, timeout=None)`| Blocking call that pauses execution until the specific job (or all submitted jobs if None) hit terminal states (`DONE`, `FAILED`, `CANCELLED`). |
 | `.pause()` / `.resume()`| Suspends or revives the core loop from pulling the next `PENDING` job into active execution. |
+| `.on_queue_drained(cb)`| Registers a callback that fires whenever the manager has no more pending or running jobs. |
 | `.jobs()`, `.running()`, `.pending()`| Returns snapshots containing lists of `Job` instances matching those states. |
 
 ### `Job` Core Status
@@ -136,7 +137,7 @@ manager.stop()
 Every abstract `Job` carries the following standard properties:
 
 - `.status` (`JobStatus`): Resolves to `"pending"`, `"running"`, `"done"`, `"failed"`, or `"cancelled"`.
-- `.result` (`Any`): The returned payload upon success (For `CmdJob`, it's `0`. For `FuncJob`, it's the Python return value).
+- `.result` (`Any`): The returned payload upon success (For `CmdJob`, it's the exit code `0`. For `FuncJob`, it's the Python return value). **Note**: Because a successful CmdJob returns `0` (which is falsy in Python), avoid checking `if job.result:` to test for success. Always check `if job.status == "done":` instead.
 - `.error` (`str \| None`): Error string or traceback recorded upon failure.
 - `.is_cancelled` (`bool`): Direct indicator flag determining cancellation triggers.
 

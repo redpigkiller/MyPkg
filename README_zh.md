@@ -135,18 +135,22 @@ for block_match in results[0][0]:            # 第一張工作表、第一個樣
 
 ### [Scheduler](docs/scheduler/scheduler_zh.md) — 任務排程
 
-跨平台任務排程器，支援任務優先級 (priority)、相依性 (dependency) 及即時 stdout 串流 (streaming)。
+輕量級、跨平台任務排程器，支援任務優先級 (priority)、資源限制 (resources) 及即時輸出串流 (streaming)。
 
 ```python
-sched = Scheduler(resources={"local": 4}, log_dir="./logs")
+from mypkg.scheduler import JobManager, CmdJob
+
+manager = JobManager(max_workers=4, resources={"local": 4})
+manager.start()
 
 compile_job = CmdJob("compile", cmd="vlogan -sverilog top.sv")
 sim_job = CmdJob("sim_01", cmd="vcs -R +tc=01",
-                 depends_on=[compile_job], priority=10)
+                 resources={"local": 1}, priority=10)
 
-sched.submit(compile_job, sim_job)
-sched.run()
-sched.summary()
+manager.add(compile_job)
+manager.add(sim_job)
+
+manager.wait()
 ```
 
 ---

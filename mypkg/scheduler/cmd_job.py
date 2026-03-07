@@ -8,9 +8,9 @@ import os
 import signal
 import subprocess
 import sys
-from typing import Callable, Dict, Optional, Union
+from typing import Any
 
-from .job import Job, RUNNING, CANCELLED
+from .job import Job, RUNNING
 
 class CmdJob(Job):
     """A job that runs a shell command on the local machine.
@@ -24,18 +24,18 @@ class CmdJob(Job):
         name: str,
         cmd: str,
         *,
-        cwd: Optional[str] = None,
-        env: Optional[Dict[str, str]] = None,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
         priority: int = 0,
         max_retries: int = 0,
-        resources: Optional[Dict[str, int]] = None,
+        resources: dict[str, int] | None = None,
         max_log_lines: int = 10_000,
     ) -> None:
         super().__init__(name, priority=priority, max_retries=max_retries, resources=resources, max_log_lines=max_log_lines)
         self.cmd = cmd
         self.cwd = cwd
         self.env = env
-        self._proc: Optional[subprocess.Popen] = None
+        self._proc: subprocess.Popen | None = None
 
     def _execute(self, log_file=None) -> None:
         """Run `self.cmd` via subprocess and stream output."""
@@ -66,6 +66,8 @@ class CmdJob(Job):
         buffer = []
         # Non-blocking OS check loop avoiding Busy Wait
         while True:
+            if proc.stdout is None:
+                break
             char = proc.stdout.read(1)
             
             if not char:  # EOF — process finished or killed
@@ -117,6 +119,7 @@ class CmdJob(Job):
             subprocess.run(
                 ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
                 capture_output=True,
+                check=False,
             )
         else:
             try:

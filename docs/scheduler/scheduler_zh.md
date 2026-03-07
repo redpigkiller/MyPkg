@@ -129,6 +129,7 @@ manager.stop()
 | `.cancel(target_id)`| 取消特定的任務（可以是字串型態的 UUID 或 UUID 實體物件），不僅會標註為 `CANCELLED` 還會對底下行程做強制終結。 |
 | `.wait(target_id=None, timeout=None)`| 卡住你的主程式，直到特定某任務（或如果未給予 ID，則是等所有加入過的任務）處於打烊狀態（`DONE`, `FAILED`, `CANCELLED`）為止才放行。 |
 | `.pause()` / `.resume()`| 暫停或重新激活 Manager 的內部派發引擎，控制何時能把下一個 `PENDING` 的任務拉出來執行。 |
+| `.on_queue_drained(cb)`| 註冊一個回呼函式，每當 Manager 內部沒有任何等待中或執行中的任務時（佇列清空）觸發。 |
 | `.jobs()`, `.running()`, `.pending()`| 回傳列表（裝滿 `Job` 的清單），抓出此時此刻正處於相對應狀態下的任務有哪些人。 |
 
 ### `Job` 核心屬性
@@ -136,7 +137,7 @@ manager.stop()
 每一個抽象 `Job` 元件身上都掛有以下的標準公開財產：
 
 - `.status` (`JobStatus`)：目前的執行狀態，只會是這五種之一：`"pending"`, `"running"`, `"done"`, `"failed"`, 或 `"cancelled"`。
-- `.result` (`Any`)：成功跑完拿到的實體包裹（以 `CmdJob` 來說，它裡面就是離場的 `0`；以 `FuncJob` 來說，就是該函數 `return` 回來的東西）。
+- `.result` (`Any`)：成功跑完拿到的實體包裹（以 `CmdJob` 來說，它裡面就是離場的退出碼 `0`；以 `FuncJob` 來說，就是該函數 `return` 回來的東西）。**注意**：因為 `CmdJob` 成功會回傳 `0`（在 Python 中被視為 `False`），請絕對不要用 `if job.result:` 來判斷是否成功，應該永遠使用 `if job.status == "done":`。
 - `.error` (`str \| None`)：萬一它任務失敗了，這裡面裝的就是最直接的錯誤字串訊息或是 Traceback。
 - `.is_cancelled` (`bool`)：如果它真的遭遇了被迫取消的命運，這會是 `True`。
 

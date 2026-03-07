@@ -128,18 +128,22 @@ for block_match in results[0][0]:            # first sheet, first template
 
 ### [Scheduler](docs/scheduler/scheduler.md) — Job Scheduling
 
-Cross-platform task scheduler supporting priority, dependencies, and real-time stdout streaming.
+A lightweight, cross-platform job scheduler supporting priority, resource constraints, and real-time output streaming.
 
 ```python
-sched = Scheduler(resources={"local": 4}, log_dir="./logs")
+from mypkg.scheduler import JobManager, CmdJob
+
+manager = JobManager(max_workers=4, resources={"local": 4})
+manager.start()
 
 compile_job = CmdJob("compile", cmd="vlogan -sverilog top.sv")
 sim_job = CmdJob("sim_01", cmd="vcs -R +tc=01",
-                 depends_on=[compile_job], priority=10)
+                 resources={"local": 1}, priority=10)
 
-sched.submit(compile_job, sim_job)
-sched.run()
-sched.summary()
+manager.add(compile_job)
+manager.add(sim_job)
+
+manager.wait()
 ```
 
 ---

@@ -5,9 +5,9 @@ func_job.py — Concrete Job subclass for local Python function execution.
 from __future__ import annotations
 
 import traceback
-from typing import Any, Callable, Dict, Optional, Tuple, Union
+from typing import Any, Callable
 
-from .job import Job, RUNNING
+from .job import Job
 
 class FuncJob(Job):
     """A job that runs a Python function in a background thread.
@@ -16,6 +16,11 @@ class FuncJob(Job):
         Because it runs in a thread, `FuncJob` is subject to the Python GIL.
         It is ideal for I/O bound tasks, but CPU bound tasks may block the 
         scheduler or fail to parallelize.
+        
+        Also note that calling `job.cancel()` on a `FuncJob` will immediately
+        set its status to `CANCELLED`, but due to Python's threading limitations, 
+        the underlying function execution cannot be forcefully stopped and will 
+        continue running in the background until it finishes naturally.
 
     Example:
         job = FuncJob("parse", my_function, args=(1, 2), kwargs={"foo": "bar"})
@@ -25,12 +30,12 @@ class FuncJob(Job):
         self,
         name: str,
         func: Callable[..., Any],
-        args: Optional[Tuple[Any, ...]] = None,
-        kwargs: Optional[Dict[str, Any]] = None,
+        args: tuple[Any, ...] | None = None,
+        kwargs: dict[str, Any] | None = None,
         *,
         priority: int = 0,
         max_retries: int = 0,
-        resources: Optional[Dict[str, int]] = None,
+        resources: dict[str, int] | None = None,
         max_log_lines: int = 10_000,
     ) -> None:
         super().__init__(name, priority=priority, max_retries=max_retries, resources=resources, max_log_lines=max_log_lines)
