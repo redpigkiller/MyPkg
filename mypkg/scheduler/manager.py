@@ -76,6 +76,10 @@ class JobManager:
         """Start the background scheduling loop."""
         if self._bg_thread and self._bg_thread.is_alive():
             return
+            
+        if getattr(self._event_bus, "_shutdown", False):
+            self._event_bus = ThreadPoolExecutor(max_workers=2, thread_name_prefix="JobEventBus")
+            
         self._stop_event.clear()
         self._bg_thread = threading.Thread(
             target=self._execute_loop, daemon=True, name="JobManagerLoop"
@@ -89,7 +93,7 @@ class JobManager:
             self._cond.notify_all()
         if self._bg_thread:
             self._bg_thread.join()
-        self._event_bus.shutdown(wait=False)
+        self._event_bus.shutdown(wait=True)
 
     def pause(self) -> None:
         with self._lock:
@@ -225,9 +229,6 @@ class JobManager:
                         ready_job._start_time = time.monotonic()
                     
                     pool.submit(self._run_job_wrapper, ready_job)
-            
-            # Flush pool on stop
-            pool.shutdown(wait=False, cancel_futures=True)
 
     def _get_ready_job(self) -> Optional[Job]:
         if self._paused:

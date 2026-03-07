@@ -1,348 +1,158 @@
-# Scheduler — 跨平台任務排程器
+# Scheduler — 極簡任務排程管理
 
 [![English](https://img.shields.io/badge/Language-English-blue.svg)](scheduler.md)
 [![繁體中文](https://img.shields.io/badge/語言-繁體中文-blue.svg)](scheduler_zh.md)
 
-## 什麼是 Scheduler？
+`Scheduler` 是一個輕量級、跨平台的任務排程模組。專為並發執行耗時的背景任務（如：程式編譯、跑大規模模擬、密集 Python 運算）而設計，確保你的應用程式不會卡死，或是瞬間爆氣耗盡系統資源。
 
-當你在開發中需要同時執行好幾個耗時的任務（例如：跑好幾十個模擬測試、編譯多個程式碼專案），如果你手動一個一個點擊執行，或是寫一個簡單的 for 迴圈同時把它們全部打開，你的電腦可能會因為**瞬間耗盡所有 CPU 和記憶體而當機**。
-
-**Scheduler (任務排程器)** 就是為了解決這個問題而誕生的！
-它就像一個聰明的餐廳經理，負責幫你：
-1. **控制同時間能處理的客人數 (資源管理)**：確保你的電腦不會被操壞。
-2. **安排上菜順序 (依賴關係)**：確保「切菜」的任務完成後，才開始「炒菜」的任務。
-3. **即時轉播現場狀況 (狀態監控)**：讓你知道現在哪些任務正在跑、哪些在排隊、哪些失敗了。
+它內建了**靜態資源追蹤**、**自動失敗重試機制**、**即時事件回呼**，以及安全的**多執行緒管理機制**，完美支援終端機指令與標準 Python 函數的排程管理。
 
 ---
 
-## 5 大核心概念 (Core Concepts)
+## 快速上手 (User Guide)
 
-在使用 Scheduler 之前，花一分鐘認識這五個核心機制，你就能完全掌握它！
+為了安全地並發執行任務，你需要建立各自獨立的 `Job` 物件（例如 `CmdJob` 或 `FuncJob`），並將它們交給 `JobManager` 來根據目前可用的電腦資源，協調它們的執行順序。
 
-1. **資源管理 (Resources)**
-   - 電腦的 CPU 核心、網路頻寬等都是有限的「資源」。
-   - 在建立 Scheduler 時，你會跟它說：「我總共有 4 個 local 資源」。
-   - 當你要執行一個 `Job` (任務) 時，你可以設定它需要消耗 1 個 local 資源。Scheduler 就會確保同時間**最多只有 4 個 Job 在跑**。如果第 5 個 Job 來了，它必須排隊等待前面有人執行完並「歸還資源」後，才能開始。
+### 1. 啟動 JobManager
 
-2. **依賴關係 (Dependencies: `depends_on`)**
-   - 透過設定 `depends_on=[任務A, 任務B]`，你可以告訴 Scheduler：「這個任務必須等『任務A』和『任務B』都順利執行完畢 (`DONE`) 才能開始」。
-   - 如果依賴的前置任務不幸失敗 (`FAILED`)，這個任務就會自動被標記失敗，避免白做工。
-
-3. **優先順序 (Priority)**
-   - 數字越大的 Job 優先級越高。當資源空出來時，Scheduler 會先派發 `priority=100` 的任務，而不是 `priority=0` 的任務。
-
-4. **超時中斷 (Timeout)**
-   - 有些任務可能會因為程式 Bug 死當。你可以為 Job 設定 `timeout=600` (秒)。如果時間到了它還沒結束，Scheduler 會毫不留情地把它強制終止 (`KILL`)，避免佔用資源。
-
-5. **互動操作 (Actions)**
-   - 不同的任務可能有自己專屬的「特殊技能」。
-   - 例如，跑完的指令任務 (CmdJob) 可以提供 `open_log` 的操作，讓你按個按鈕就能用預設套裝軟體打開日誌檔。每個任務可以做的事情都不同，你可以用 `.actions("任務名稱")` 來探索它會什麼招式！
-
----
-
-## 快速上手示範
-
-只要 3 個步驟，馬上讓 Scheduler 幫你管好你的任務！
+Manager 是你的系統守門員。你可以在一開始告訴它你的資源上限。
 
 ```python
-from mypkg import Scheduler, CmdJob
+from mypkg.scheduler import JobManager
 
-# 步驟 1：建立一個 Scheduler
-# 告訴它：你最多只能同時使用 4 個名稱為 "local" 的資源
-sched = Scheduler(resources={"local": 4}, log_dir="./logs")
+# 限制最多開啟 4 個並行 Worker 執行緒，並且隨時最多只能有一個任務佔用 "gpu" 資源
+manager = JobManager(max_workers=4, resources={"gpu": 1})
 
-# 步驟 2：建立工作任務 (Job)
-# compile_job 是一個終端機指令任務
-compile_job = CmdJob("compile", cmd="gcc main.c -o main")
+# 啟動背景派發迴圈
+manager.start()
+```
 
-# sim_job 也是一個指令任務，但它說：「我必須等 compile_job 跑完才能跑我喔！」
+### 2. 建立任務 (Jobs)
+
+任務是實際執行的單元。你可以使用 `CmdJob` 執行終端機指令，或是使用 `FuncJob` 執行你寫的 Python 函數。
+
+```python
+from mypkg.scheduler import CmdJob, FuncJob
+
+# 一個簡單的終端機編譯指令
+compile_job = CmdJob(
+    name="build_app", 
+    cmd="make clean && make -j4",
+    cwd="/path/to/project",
+)
+
+# 一個需要特殊資源且具備自動重試邏輯的指令任務
 sim_job = CmdJob(
-    name="run_sim", 
-    cmd="./main", 
-    depends_on=[compile_job],  # 設定依賴關係
-    timeout=60                 # 60秒跑不完就砍掉
+    name="run_sim",
+    cmd="./simulator --intensive",
+    resources={"gpu": 1},  # 如果 GPU 正在被別人用，這個任務會自動乖乖排隊不搶佔
+    max_retries=2,         # 失敗的話自動重試最多 2 次
+    priority=10,           # 權重越高的數字越先被派發執行
 )
 
-# 步驟 3：把任務交給 Scheduler，然後叫它開始工作！
-sched.submit(compile_job, sim_job)
-sched.run()          # 這個指令會卡住 (Blocking)，直到所有任務都跑完為止
+# 一個自訂的 Python 函數任務
+def calc_pi(precision):
+    # 進行複雜運算...
+    return 3.14
 
-print(sched.summary())  # 跑完後，印出漂亮的總結報表！(summary() 回傳 str)
-```
-
----
-
-## 如何控制 Scheduler？ (API 詳解)
-
-這裡列出了你可以如何操作 `Scheduler` 物件，每個指令都能讓你掌控全局。
-
-### 📅 加入與啟動
-* `submit(*jobs)`：把好幾個 Job 丟進排隊佇列中。
-* `run()`：**會卡住程式**。它會開始派發任務，並一直等到所有任務都完成 (或者失敗) 後，才會換下一行程式碼執行。適合寫成腳本。
-* `start()`：**不會卡住程式**。它會在背景開一個隱形人員 (Thread) 幫你繼續派發任務，你的程式碼可以立刻繼續往下執行。適合用在有 UI 的圖形介面程式。
-* `wait()`：如果你用了 `start()`，但在某個時刻你想等它全部跑完，就呼叫 `wait()`。
-
-### ⏸️ 暫停、繼續與停止
-* `pause()`：暫停排程器。**正在執行中的 Job 會繼續跑完**，但不會再派發新的任務。
-* `resume()`：恢復排程器。暫停期間排隊的任務會重新開始被派發。
-* `stop()`：告訴 Scheduler：「別再派發新的任務了！」。但它非常有禮貌，會等**正在執行中**的 Job 乖乖跑完才真正結束。
-* `is_complete() -> bool`：如果所有已提交的 Job 都已到達終態（done/failed/cancelled）則回傳 `True`，尚未提交任何 Job 時回傳 `False`。適合驅動互動迴圈。
-* `is_running` (property → bool)：排程器的背景執行緒是否仍在運行（`start()` 後為 `True`，結束後為 `False`）。
-
-### 🕹️ 單一任務互動
-你想針對排隊中的特定一個任務 (`"任務名稱"`) 做事時：
-* `get("name")`：把那個 `Job` 物件拿出來給你操作。
-* `follow("name", n=20)`：像直播一樣！把這個任務輸出的最後 20 行內容即時印在你的 Terminal 上。
-* `cancel("name")`：把**還在排隊**的任務直接抽掉，不跑了。
-* `kill("name")`：把**正在跑**的任務直接暴力終止。
-* `set_priority("name", n)`：這個任務太急了，給它插隊！把優先級調高。
-* `actions("name")`：問這個任務：「你會什麼絕招？」。它會回傳它能執行的特殊操作名稱。
-* `action("name", "絕招名稱")`：直接命令這個任務施展它的絕招（例如 `"open_log"`）。
-
-### 📊 狀態與篩選
-想知道大家現在都跑到哪裡了嗎？
-* `status() -> str`：**回傳**簡潔的目前狀況表（誰在排隊、誰在跑），用 `print(sched.status())` 來顯示。
-* `summary() -> str`：**回傳**詳細的總結帳單（包含所有任務的花費時間、成功或失敗），用 `print(sched.summary())` 來顯示。
-* 你還可以直接調閱名單 (會回傳 Job 的清單)：
-  * `sched.pending`：還在排隊的名單
-  * `sched.running`：正在執行的名單
-  * `sched.done`：順利完成的名單
-  * `sched.failed`：執行失敗的名單
-  * `sched.cancelled`：被取消的名單
-
----
-
-## 內建的工作類型 (Built-in Jobs)
-
-### CmdJob (本機終端機指令)
-專門用來在你的電腦上執行文字介面指令。
-
-```python
-CmdJob(
-    name="sim_01",
-    cmd="python run.py --tc 01",            # 你要在終端機打的指令
-    cwd="/proj/sim",                        # [選填] 你想切換到哪個資料夾下達指令？
-    env={"SEED": "42"},                     # [選填] 需要額外給它什麼環境變數？
-    priority=10,                            # 數字越大越先跑
-    resources={"local": 1},                 # [選填] 它會吃掉 1 的 local 資源 (預設就是 1)
+math_job = FuncJob(
+    name="calculate_pi",
+    func=calc_pi,
+    kwargs={"precision": 100}
 )
 ```
 
----
+### 3. 加入排程與等待完成
 
-## 掛鉤與即時監控 (Hooks & Matchers)
-
-### Hooks — 生命週期事件回呼
-
-你可以在 Job 的各個生命週期階段掛上 callback，讓它在特定事件發生時自動通知你。
-
-| Hook 事件 | 觸發時機 | Callback 簽名 |
-|-----------|---------|---------------|
-| `on_start` | Job 開始執行前 | `callback(job)` |
-| `on_done` | Job 順利完成後 | `callback(job)` |
-| `on_fail` | Job 失敗後 | `callback(job)` |
-| `on_cancel` | Job 被取消時 | `callback(job)` |
-| `on_output` | 每產出一行 stdout | `callback(line, job)` |
+一旦 Manager 處於啟動狀態，只要把這幾項任務丟給它加入排隊佇列即可。你可以隨時阻塞主程式等待所有人（或是特定單一任務）完工。
 
 ```python
-job = CmdJob("sim", cmd="python run.py")
+# 把任務推入佇列排隊
+manager.add(compile_job)
+manager.add(sim_job)
+manager.add(math_job)
 
-# 完成時通知
-job.add_hook("on_done", lambda j: print(f"✅ {j.name} 完成！"))
+# 等待全部任務執行完畢 (你的程式卡在這裡直到全數執行終止)
+manager.wait()
 
-# 失敗時發出警告
-job.add_hook("on_fail", lambda j: print(f"❌ {j.name} 失敗！exit_code={j.exit_code}"))
-
-# 即時監看輸出 (每行輸出都會觸發)
-job.add_hook("on_output", lambda line, j: print(f"[{j.name}] {line}"))
-
-# 不想監聽了？移除 hook
-job.remove_hook("on_output", my_callback)
+print(f"模擬測試最後結果狀態：{sim_job.status}")
+print(f"Python 函數運算結果：{math_job.result}")
 ```
 
-**讀取歷史輸出**
-```python
-job.tail(20)          # 直接拿最後 20 行產出
-job.output_lines      # 取得完整 output 紀錄快照 (list[str])
-```
+### 4. 互動回呼與 Log 監控
 
-> [!NOTE]
-> `on_output` hook 是**即時觸發**的，每當 process 產出一行就立刻呼叫。
-> `output_lines` 和 `tail()` 是**快照讀取** — 回傳當下已捕捉到的內容，可從任何 thread 安全呼叫。
-
-### Matchers — 智慧型 Log 分析
-
-Matcher 讓你定義一個「匹配函數」，當 output 中出現符合條件的內容時，自動觸發 callback。
+你可以為任務掛上 Callback (回呼)，用來監控進度、處理失敗，甚至即時監聽主控台發出的特定關鍵字。
 
 ```python
-import re
+test_job = CmdJob("test", "pytest -v")
 
-# 偵測 output 中的 ERROR 字樣
-def find_error(line):
-    m = re.search(r"ERROR: (.+)", line)
-    return m.group(1) if m else None  # 回傳 truthy → 觸發 callback
+# 監聽狀態改變
+test_job.on_done(lambda job: print(f"✅ {job.name} 通過了！"))
+test_job.on_fail(lambda job, err: print(f"❌ {job.name} 失敗了，錯誤：{err}"))
 
-def on_error(matched_text, job):
-    print(f"⚠️ Job {job.name} 遇到錯誤: {matched_text}")
+# 當任務的輸出內容符合某個 Regex 正規表達式時，即時觸發動作
+test_job.watch(r"FAILED", lambda job, match: print("糟糕，有一個測資沒過！"))
 
-job.add_matcher(find_error, on_error, name="error_finder", timing="realtime")
+# 隨時調閱最後 5 行捕捉下來的 Output 內容
+print(test_job.tail(5))
 ```
 
-| 參數 | 說明 |
-|------|------|
-| `timing="realtime"` | 每行 output 產出時**即時** match |
-| `timing="post"` | Job 結束後，**一次性**掃描所有 output |
-| `once=True` | match 到第一次後自動移除 |
+### 5. 暫停與取消任務
+
+如果你發現剛推進去的任務不需要跑了，或是你想讓電腦喘口氣暫停整個大會：
+
+```python
+# 從佇列中抽出這個任務（如果已經在跑了就會被強制砍掉）
+manager.cancel(sim_job.id)
+
+# 暫時凍結整個 Manager，不再派發任何新任務
+manager.pause()
+
+# 恢復正常營運
+manager.resume()
+
+# 禮貌地完整關閉 Manager 的背景執行緒 (會乖乖等正在跑的人跑完才收工)
+manager.stop()
+```
 
 ---
 
-## 進階：打造你的專屬 Job (Custom Job)
+## API Reference (詳細控制)
 
-有時候你可能不只是想打打終端機指令，而是想讓 Scheduler 幫你排隊執行某個你寫好的 **Python 函數**。
+### `JobManager` API
 
-繼承 `Job` 基礎模板，重寫執行邏輯就能打造自己專屬的打工仔！
+| 方法 | 說明 |
+| --- | --- |
+| `JobManager(max_workers=4, resources=None, log_dir=None)`| 初始化管理員。`resources` 為字典型態的容量上限 (`Dict[str, int]`)。不夠資源的排隊者會在旁邊等候。 |
+| `.start()` / `.stop()`| 啟動或關閉 Manager 在背景輪詢派發的 Thread。停止時並不會強制砍斷正在執行的任務（RUNNING），而是等他們完成才讓 Thread 收工。 |
+| `.add(job)`| 將一個 `Job` 物件加進佇列隊伍。如果任務要求的資源超出了 Manager 的物理上限，會在這一瞬間直接報 `ValueError`。 |
+| `.cancel(target_id)`| 取消特定的任務（可以是字串型態的 UUID 或 UUID 實體物件），不僅會標註為 `CANCELLED` 還會對底下行程做強制終結。 |
+| `.wait(target_id=None, timeout=None)`| 卡住你的主程式，直到特定某任務（或如果未給予 ID，則是等所有加入過的任務）處於打烊狀態（`DONE`, `FAILED`, `CANCELLED`）為止才放行。 |
+| `.pause()` / `.resume()`| 暫停或重新激活 Manager 的內部派發引擎，控制何時能把下一個 `PENDING` 的任務拉出來執行。 |
+| `.jobs()`, `.running()`, `.pending()`| 回傳列表（裝滿 `Job` 的清單），抓出此時此刻正處於相對應狀態下的任務有哪些人。 |
 
-**Job 生命週期**：
-```
-on_start hooks → _pre_execute() → _execute() → _post_execute() → on_done / on_fail / on_cancel hooks
-```
+### `Job` 核心屬性
 
-### 完整範例：把 Python Function 變成 Job
+每一個抽象 `Job` 元件身上都掛有以下的標準公開財產：
 
-```python
-import time
-from mypkg.scheduler.job import Job, DONE, FAILED
+- `.status` (`JobStatus`)：目前的執行狀態，只會是這五種之一：`"pending"`, `"running"`, `"done"`, `"failed"`, 或 `"cancelled"`。
+- `.result` (`Any`)：成功跑完拿到的實體包裹（以 `CmdJob` 來說，它裡面就是離場的 `0`；以 `FuncJob` 來說，就是該函數 `return` 回來的東西）。
+- `.error` (`str \| None`)：萬一它任務失敗了，這裡面裝的就是最直接的錯誤字串訊息或是 Traceback。
+- `.is_cancelled` (`bool`)：如果它真的遭遇了被迫取消的命運，這會是 `True`。
 
-class PythonJob(Job):
-    """將任意 Python 函數變成可以讓 Scheduler 排隊的 Job"""
+### `CmdJob` 建立參數
+* `name`：方便印 Log 出來認親的顯示名稱字串。
+* `cmd`：你在終端機實際要砸下去執行的指令字串。
+* `cwd`：你想讓這個指令在哪個絕對路徑的資料夾裡起跑？
+* `env`：全部的環境變數覆蓋字典。
+* `priority`：代表排隊順位的優先級整數。數字越大越早叫號。
+* `max_retries`：萬一失敗了，容忍它死而復生重新挑戰的扣打次數。
+* `resources`：`Dict[str, int]` 限縮它這個任務跑下去會吸走電腦的那些資源標籤與量級。
+* `max_log_lines`：記憶體內部保留歷史吐出結果（Deque）的清單長度。預設 `10000` 行。
 
-    def __init__(self, name, func, *args, **kwargs):
-        # 1. 記得呼叫老爸 (super) 來設定基礎建設
-        # cmd 可以隨便給一個能識別的字串
-        super().__init__(name, cmd="[Python 可呼叫物件]")
-        
-        # 把參數存起來等等用
-        self.func = func
-        self.args = args
-        self.kwargs = kwargs
-
-        # ⭐️ 重點：為你的專屬 Job 裝備「專屬招式 (Action)」
-        self.register_action("say_hi", "這是一個會說 Hi 的絕招", lambda: print(f"Hi! 我是 {name} 任務"))
-
-    def _pre_execute(self):
-        """[選填] 在 _execute 前自動呼叫，適合做初始化"""
-        self._emit_line("正在做前置準備...")
-
-    def _execute(self, log_file=None):
-        """2. 這是最核心的邏輯，Scheduler 輪到它的時候會呼叫這裡"""
-        try:
-            self._emit_line(f"準備開始執行函數：{self.func.__name__}")
-            
-            # 實際執行你的 Python 程式碼
-            result = self.func(*self.args, **self.kwargs)
-            
-            self._emit_line(f"執行成功！計算結果等於 {result}")
-            
-            # 3. 非常重要：你必須在最後誠實申報這份工作的狀態
-            self.exit_code = 0          # 0 代表成功
-            self.status = DONE          # 標記為順利結案
-            
-        except Exception as e:
-            self._emit_line(f"糟糕，程式出錯了：{e}")
-            self.exit_code = 1          # 非 0 代表失敗
-            self.status = FAILED        # 標記為結案失敗
-
-
-# ================================
-# 🎉 實際測試看看！
-# ================================
-def compute_heavy_math(x, y):
-    time.sleep(2) # 假裝運算很久
-    return x ** y
-
-# 放進你剛打造的 PythonJob 裡
-my_job = PythonJob("math_task", compute_heavy_math, 2, 10)
-
-# 掛上完成通知
-my_job.add_hook("on_done", lambda j: print(f"🎉 {j.name} 計算完畢！"))
-
-# 丟進排程器中執行
-sched = Scheduler(resources={"local": 2})
-sched.submit(my_job)
-sched.run()
-
-# 施展這個 Job 的專屬絕招！(會印出 Hi)
-sched.action("math_task", "say_hi")
-```
-
-恭喜你！現在你完全了解 Scheduler 從底層概念到進階擴充的所有秘密了！
-
----
-
-## 整合模式：CLI / TUI / GUI
-
-### 模式 A — 短時工作（Blocking）
-
-最簡單的用法：提交所有任務，呼叫 `run()`，結束後查看結果。
-
-```python
-from mypkg import Scheduler, CmdJob
-
-sched = Scheduler(resources={"local": 4})
-sched.submit(CmdJob("build", cmd="make -j4"))
-sched.submit(CmdJob("test",  cmd="pytest", depends_on=[sched.get("build")]))
-
-sched.run()                    # 阻塞直到所有 job 完成
-print(sched.summary())         # summary() 回傳 str，用 print() 顯示
-```
-
-### 模式 B — 長時監控迴圈（CLI / TUI）
-
-用 `start()` + `is_complete()` 驅動互動式命令迴圈。
-
-```python
-from mypkg import Scheduler, CmdJob
-
-sched = Scheduler(resources={"local": 4})
-sched.submit(CmdJob("sim", cmd="python run_sim.py", timeout=3600))
-sched.start()                          # 非阻塞，立刻返回
-
-while not sched.is_complete():
-    cmd = input("command> ").strip()
-    if cmd == "status":
-        print(sched.status())          # 回傳 str
-    elif cmd == "summary":
-        print(sched.summary())         # 回傳 str
-    elif cmd == "pause":
-        sched.pause()
-    elif cmd == "resume":
-        sched.resume()
-    elif cmd.startswith("kill "):
-        sched.kill(cmd.split()[1])
-    elif cmd.startswith("follow "):
-        sched.follow(cmd.split()[1])   # 即時串流輸出直到 job 結束
-    elif cmd.startswith("cancel "):
-        sched.cancel(cmd.split()[1])
-
-sched.wait()                          # 確保背景執行緒乾淨退出
-print(sched.summary())
-```
-
-### 模式 C — GUI / 事件驅動（callback 模式）
-
-GUI 框架有自己的事件迴圈，改用 hook 取代輪詢。
-
-```python
-from mypkg import Scheduler, CmdJob
-
-sched = Scheduler(resources={"local": 4})
-job = CmdJob("long_task", cmd="python heavy.py")
-
-# GUI callback：每行輸出時更新進度 widget
-job.add_hook("on_output", lambda line, j: gui.append_log(line))
-job.add_hook("on_done",   lambda j: gui.show_success(j.name))
-job.add_hook("on_fail",   lambda j: gui.show_error(j.name, j.exit_code))
-
-sched.submit(job)
-sched.start()   # scheduler 在背景跑，GUI event loop 繼續
-```
+### `FuncJob` 建立參數
+和上面大同小異，但這東西接的是：
+* `func`：Python 內可被呼叫的實體函式物件。
+* `args`：Tuple 清單，代表你在呼叫該函式時帶進去的位置參數。
+* `kwargs`：字典形式對應的 Keyword 函式進件參數。
+> **注意**：`FuncJob` 完全是生存在你 ThreadPool 的背景執行緒裡的。因為 Python 有 GIL (全域直譯器鎖) 限制，這種 Job 大多數場合只適合處理輕度的 Python-bound 文件操作或 API 網路流請求，如果打算讓它死命咬住 CPU 高效能運算，請改用另外開 Process 程序的 `CmdJob` 才是解藥。
