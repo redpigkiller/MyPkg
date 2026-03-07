@@ -88,11 +88,10 @@ A tracker designed for script-based multi-stage workflows, supporting stage clas
 from mypkg.utils.stage_tracker import StageTracker
 
 tracker = StageTracker() # Globally unique thread-safe tracker
-tracker.set_stage("Init") # Flat Mode (Sequential stages)
+tracker.begin_stage("Init") # Flat Mode (Sequential stages)
 tracker.info("Starting up...")
 
 with tracker.stage("Process"): # Context Mode (Auto resource management)
-    tracker.add_artifact({"key": "value"}) # Record any object
     tracker.error("Missing input file")    # Accumulates error without crashing
 
 tracker.summary()                    # Auto-prints failure report

@@ -370,7 +370,7 @@ class NumBV:
             # Fractional bits are exactly the same — zero cost.
             # (Width differences are handled safely by the caller's overflow logic)
             if other._frac == self._frac:
-                return other._raw 
+                return other._raw
             
             # Different format: Align via integer bit-shifting instead of float conversion.
             frac_diff = self._frac - other._frac
@@ -782,7 +782,6 @@ class NumBV:
             max_frac = max(self._frac, other._frac)
             self_aligned = self._raw << (max_frac - self._frac)
             other_aligned = other._raw << (max_frac - other._frac)
-            
             return np.equal(self_aligned, other_aligned)
         
         if isinstance(other, (int, float)):
@@ -791,19 +790,55 @@ class NumBV:
 
     def __lt__(self, other: NumBV | int | float) -> bool | np.ndarray:
         """Element-wise less-than. Scalar → ``bool``, array → ``np.ndarray``."""
-        return np.less(self._raw, self._other_raw(other))
+        if isinstance(other, NumBV):
+            max_frac = max(self._frac, other._frac)
+            s_aligned = self._raw << (max_frac - self._frac)
+            o_aligned = other._raw << (max_frac - other._frac)
+            return np.less(s_aligned, o_aligned)
+            
+        if isinstance(other, (int, float)):
+            return np.less(self._raw, self._other_raw(other))
+            
+        return NotImplemented
 
     def __le__(self, other: NumBV | int | float) -> bool | np.ndarray:
         """Element-wise less-or-equal. Scalar → ``bool``, array → ``np.ndarray``."""
-        return np.less_equal(self._raw, self._other_raw(other))
+        if isinstance(other, NumBV):
+            max_frac = max(self._frac, other._frac)
+            s_aligned = self._raw << (max_frac - self._frac)
+            o_aligned = other._raw << (max_frac - other._frac)
+            return np.less_equal(s_aligned, o_aligned)
+            
+        if isinstance(other, (int, float)):
+            return np.less_equal(self._raw, self._other_raw(other))
+            
+        return NotImplemented
 
     def __gt__(self, other: NumBV | int | float) -> bool | np.ndarray:
         """Element-wise greater-than. Scalar → ``bool``, array → ``np.ndarray``."""
-        return np.greater(self._raw, self._other_raw(other))
+        if isinstance(other, NumBV):
+            max_frac = max(self._frac, other._frac)
+            s_aligned = self._raw << (max_frac - self._frac)
+            o_aligned = other._raw << (max_frac - other._frac)
+            return np.greater(s_aligned, o_aligned)
+            
+        if isinstance(other, (int, float)):
+            return np.greater(self._raw, self._other_raw(other))
+            
+        return NotImplemented
 
     def __ge__(self, other: NumBV | int | float) -> bool | np.ndarray:
         """Element-wise greater-or-equal. Scalar → ``bool``, array → ``np.ndarray``."""
-        return np.greater_equal(self._raw, self._other_raw(other))
+        if isinstance(other, NumBV):
+            max_frac = max(self._frac, other._frac)
+            s_aligned = self._raw << (max_frac - self._frac)
+            o_aligned = other._raw << (max_frac - other._frac)
+            return np.greater_equal(s_aligned, o_aligned)
+            
+        if isinstance(other, (int, float)):
+            return np.greater_equal(self._raw, self._other_raw(other))
+            
+        return NotImplemented
 
     # -- numpy interop -----------------------------------------------------
 

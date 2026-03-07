@@ -95,11 +95,10 @@ lst = arr.to_numbv_list()      # → list[NumBV]
 from mypkg.utils.stage_tracker import StageTracker
 
 tracker = StageTracker() # 全域唯一 Thread-Safe Tracker
-tracker.set_stage("Init") # Flat Mode (依序階段)
+tracker.begin_stage("Init") # Flat Mode (依序階段)
 tracker.info("Starting up...")
 
 with tracker.stage("Process"): # Context Mode (自動資源管理)
-    tracker.add_artifact({"key": "value"}) # 紀錄任意物件
     tracker.error("Missing input file")    # 累積錯誤而不中斷程式
 
 tracker.summary()                    # 自動印出失敗報告

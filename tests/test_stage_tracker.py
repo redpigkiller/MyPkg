@@ -1,210 +1,250 @@
+import threading
+import time
 import pytest
-import os
-import logging
-from mypkg.utils.stage_tracker import StageTracker, StageFailedError, UsageError, ErrorLevel
+from unittest.mock import patch, MagicMock
 
-@pytest.fixture
-def tracker():
-    # Use a unique name to avoid conflicts
-    log = StageTracker("TestLogger")
-    log.console_enabled = False # Disable console for tests to keep output clean
-    yield log
-    for h in log.logger.handlers:
-        h.close()
-        log.logger.removeHandler(h)
+from mypkg.utils.stage_tracker import StageTracker, ErrorLevel, StageFailedError, UsageError, Issue
 
-def test_strict_mode_flat_to_context(tracker):
-    tracker.set_stage("Flat")
-    with pytest.raises(UsageError):
-        with tracker.stage("Context"):
+# ---------------------------------------------------------------------------
+# Initialization & Mode Tests
+# ---------------------------------------------------------------------------
+
+def test_init_invalid_mode():
+    with pytest.raises(ValueError, match="mode must be 'flat' or 'context'"):
+        StageTracker(mode="invalid_mode")
+
+def test_flat_mode_cannot_use_stage():
+    with StageTracker(mode="flat") as t:
+        with pytest.raises(UsageError, match=r"stage\(\) only valid in context mode"):
+            with t.stage("Test"):
+                pass
+
+def test_context_mode_cannot_use_begin_stage():
+    with StageTracker(mode="context") as t:
+        with pytest.raises(UsageError, match=r"begin_stage\(\) only valid in flat mode"):
+            t.begin_stage("Test")
+
+# ---------------------------------------------------------------------------
+# Flat Mode Tests
+# ---------------------------------------------------------------------------
+
+def test_flat_mode_normal_execution():
+    with StageTracker(mode="flat") as t:
+        t.begin_stage("Stage1")
+        t.info("Process A")
+        
+        t.begin_stage("Stage2")
+        t.info("Process B")
+        t.warning("Some warning")
+
+    issues = t.get_issues()
+    # Warnings are tracked by default
+    assert len(issues) == 1
+    assert issues[0].level == ErrorLevel.WARNING
+    assert issues[0].stage == "Stage2"
+
+def test_flat_mode_accumulate_errors():
+    with pytest.raises(StageFailedError) as exc_info:
+        with StageTracker(mode="flat") as t:
+            t.begin_stage("Validation")
+            t.error("Invalid data point 1")
+            t.error("Invalid data point 2")
+            # Exiting `with` block triggers finalization and raises StageFailedError
+            
+    assert exc_info.value.stage == "Validation"
+    assert exc_info.value.error_count == 2
+    assert len(exc_info.value.issues) == 2
+
+def test_flat_mode_fatal():
+    with pytest.raises(StageFailedError) as exc_info:
+        with StageTracker(mode="flat") as t:
+            t.begin_stage("Init")
+            t.fatal("System crash")
+            
+    assert exc_info.value.stage == "Init"
+    assert exc_info.value.error_count == 1
+    assert "System crash" in exc_info.value.issues[0].message
+
+def test_flat_mode_checkpoint():
+    with pytest.raises(StageFailedError):
+        with StageTracker(mode="flat") as t:
+            t.begin_stage("Load")
+            t.error("Missing file")
+            t.checkpoint() # Raises immediately
+            t.info("This should not run")
+
+# ---------------------------------------------------------------------------
+# Context Mode Tests
+# ---------------------------------------------------------------------------
+
+def test_context_mode_normal_execution():
+    with StageTracker(mode="context") as t:
+        with t.stage("StageA"):
+            t.info("Process A")
+        
+        with t.stage("StageB"):
+            t.warning("Some warning")
+
+    issues = t.get_issues()
+    assert len(issues) == 1
+    assert issues[0].level == ErrorLevel.WARNING
+    assert issues[0].stage == "StageB"
+
+def test_context_mode_accumulate_errors():
+    with pytest.raises(StageFailedError) as exc_info:
+        with StageTracker(mode="context") as t:
+            with t.stage("Process"):
+                t.error("Error 1")
+                t.error("Error 2")
+            # Exiting the `with t.stage` raises health check exception
+            
+    assert exc_info.value.stage == "Process"
+    assert exc_info.value.error_count == 2
+
+def test_context_mode_exception_reraise():
+    """Test that a non-StageFailedError exception inside a stage is propagated."""
+    with pytest.raises(ValueError, match="Custom error"):
+        with StageTracker(mode="context") as t:
+            with t.stage("Math"):
+                raise ValueError("Custom error")
+
+def test_context_mode_fatal():
+    with pytest.raises(StageFailedError) as exc_info:
+        with StageTracker(mode="context") as t:
+            with t.stage("Init"):
+                t.fatal("Memory full")
+    
+    assert exc_info.value.stage == "Init"
+
+def test_context_mode_nested_not_allowed():
+    with StageTracker(mode="context") as t:
+        with pytest.raises(UsageError, match="Nested stages are not supported"):
+            with t.stage("Outer"):
+                with t.stage("Inner"):
+                    pass
+
+def test_duplicate_stage_name():
+    with StageTracker(mode="context") as t:
+        with t.stage("Same"):
             pass
+        with pytest.raises(UsageError, match="already exists"):
+            with t.stage("Same"):
+                pass
 
-def test_strict_mode_context_to_flat(tracker):
-    with tracker.stage("Context"):
-        pass
-    with pytest.raises(UsageError):
-        tracker.set_stage("Flat")
+# ---------------------------------------------------------------------------
+# Logging & Issue Querying
+# ---------------------------------------------------------------------------
 
-def test_nesting_prohibited(tracker):
-    with pytest.raises(UsageError):
-        with tracker.stage("Outer"):
-             with tracker.stage("Inner"):
-                 pass
-
-def test_accumulated_error_flat(tracker):
-    tracker.set_stage("Stage1")
-    tracker.error("Error 1")
-    tracker.error("Error 2")
+def test_issue_querying():
+    t = StageTracker(mode="flat")
+    t.begin_stage("A")
+    t.debug("d1", track=True)
+    t.info("i1", track=True)
+    try:
+        t.begin_stage("B")
+    except StageFailedError:
+        pass # Expected because A had an error
+        
+    # Manually set Stage B instead, or simply bypass health check for this test
+    # Actually if B failed, current stage is None.
+    # We should catch it, but `t.error("e2")` will go to "System" or None.
+    # Let's bypass health check logic by not entering B with begin_stage, or just clear issues.
     
-    # Should raise when starting next stage
-    with pytest.raises(StageFailedError) as exc:
-        tracker.set_stage("Stage2")
+    t.clear_issues()
+    t.begin_stage("A")
+    t.debug("d1", track=True)
+    t.info("i1", track=True)
+    t.warning("w1", track=True)
+    t.error("e1")
     
-    assert exc.value.stage == "Stage1"
-    assert exc.value.error_count == 2
-
-def test_accumulated_error_context(tracker):
-    with pytest.raises(StageFailedError) as exc:
-        with tracker.stage("Stage1"):
-            tracker.error("Error 1")
+    # Inject directly
+    with t._issues_lock:
+        t._issues["B"] = [Issue(ErrorLevel.ERROR, "e2", "B")]
     
-    assert exc.value.stage == "Stage1"
-    assert exc.value.error_count == 1
-
-def test_fatal_error(tracker):
-    tracker.set_stage("Stage1")
-    with pytest.raises(StageFailedError):
-        tracker.fatal("Fatal error")
-
-def test_checkpoint(tracker):
-    tracker.set_stage("Stage1")
-    tracker.error("Error 1")
+    # get all
+    assert len(t.get_issues()) == 5
     
-    with pytest.raises(StageFailedError):
+    # get by stage
+    assert len(t.get_issues(stage="A")) == 4
+    
+    # get by level
+    assert len(t.get_issues(level=ErrorLevel.ERROR)) == 2
+    assert len(t.get_issues(level="error")) == 2
+    
+    # get multiple levels
+    assert len(t.get_issues(level=["error", "warning"])) == 3
+    
+    # get by stage and level
+    assert len(t.get_issues(stage="A", level="error")) == 1
+    
+    t.clear_issues()
+
+# ---------------------------------------------------------------------------
+# Thread Safety
+# ---------------------------------------------------------------------------
+
+def thread_worker(tracker, thread_name, raises=False):
+    t_name = threading.current_thread().name
+    
+    # Flat mode is thread-local, each thread should have its own stages
+    tracker.begin_stage("LocalInit")
+    tracker.warning(f"Warning from {t_name}")
+    
+    tracker.begin_stage("LocalWork")
+    if raises:
+        tracker.error(f"Error from {t_name}")
+    
+    if raises:
+        try:
+            tracker.checkpoint()
+        except StageFailedError:
+            pass
+    else:
         tracker.checkpoint()
 
-def test_success_path(tracker):
-    tracker.set_stage("Stage1")
-    tracker.info("Info")
-    tracker.warning("Warning")
+def test_threading_isolation():
+    tracker = StageTracker(mode="flat")
     
-    # Should not raise
-    tracker.set_stage("Stage2")
-    tracker.info("Done")
+    t1 = threading.Thread(target=thread_worker, args=(tracker, "T1", False), name="T1")
+    t2 = threading.Thread(target=thread_worker, args=(tracker, "T2", True), name="T2")
+    
+    t1.start()
+    t2.start()
+    t1.join()
+    t2.join()
+    
+    issues = tracker.get_issues()
+    assert len(issues) == 3 # 1 warning T1, 1 warning T2, 1 error T2
+    
+    # Check threads stage names
+    assert len(tracker.get_issues(stage="LocalInit#T1")) == 1
+    assert len(tracker.get_issues(stage="LocalInit#T2")) == 1
+    assert len(tracker.get_issues(stage="LocalWork#T2")) == 1
 
-def test_summary_inclusion(tracker):
-    tracker.set_stage("Stage1")
-    tracker.info("Ignored Info")
-    tracker.warning("Important Warning", track=True)
-    tracker.warning("Warning")
-    
-    infos = [i for i in tracker.issues if i.level == ErrorLevel.INFO]
-    assert len(infos) == 0
-    
-    warnings = [i for i in tracker.issues if i.level == ErrorLevel.WARNING]
-    assert len(warnings) == 2
+# ---------------------------------------------------------------------------
+# Summary Output
+# ---------------------------------------------------------------------------
 
-def test_artifacts(tracker):
-    tracker.set_stage("Stage1")
-    data = {"key": "value"}
-    tracker.add_artifact(data)
-    assert len(tracker.artifacts) == 1
-    assert tracker.artifacts[0].value == data
+@patch('builtins.print')
+def test_plain_summary_output(mock_print):
+    # Test plain text fallback
+    with pytest.raises(StageFailedError):
+        with StageTracker(mode="flat", plain=True) as t:
+            t.begin_stage("Process")
+            t.warning("Warn")
+            t.error("Err")
+    
+    # mock_print should have been called for summary
+    assert mock_print.called
+    
+    # Check if SUCCESS/FAILED appears
+    output = "\n".join([call.args[0] for call in mock_print.call_args_list if type(call.args[0]) is str])
+    assert "FAILED: 1 critical/errors found" in output
+    assert "Process" in output
 
-def test_exc_info(tracker):
-    tracker.set_stage("Stage1")
-    try:
-        1 / 0
-    except ZeroDivisionError:
-        tracker.error("Math error", exc_info=True)
-    assert len(tracker.issues) == 1
-    assert tracker.issues[0].message == "Math error"
-
-def test_reset(tracker):
-    tracker.set_stage("Stage1")
-    tracker.error("Error 1")
-    assert len(tracker.issues) == 1
-    assert tracker.current_stage == "Stage1"
+def test_successful_summary():
+    with StageTracker(mode="flat", plain=True) as t:
+        t.begin_stage("A")
+        t.info("Ok")
     
-    tracker.reset()
-    
-    assert len(tracker.issues) == 0
-    assert tracker.current_stage is None
-    assert tracker.stage_history == []
-
-def test_get_issues(tracker):
-    tracker.set_stage("Stage1")
-    tracker.warning("Warning 1", track=True)
-    tracker.error("Error 1")
-    
-    # Filter by stage
-    s1_issues = tracker.get_issues(stage="Stage1")
-    assert len(s1_issues) == 2, f"Expected 2 issues (Warning 1, Error 1), got {len(s1_issues)}: {[str(i) for i in s1_issues]}"
-    assert s1_issues[0].message == "Warning 1"
-    
-    # Filter by level
-    errors = tracker.get_issues(level=ErrorLevel.ERROR)
-    assert len(errors) == 1
-    assert errors[0].message == "Error 1"
-    
-    warnings = tracker.get_issues(level="WARNING")
-    assert len(warnings) == 1
-    assert warnings[0].message == "Warning 1"
-    
-    # Filter by list of levels
-    major_issues = tracker.get_issues(level=[ErrorLevel.WARNING, ErrorLevel.ERROR])
-    assert len(major_issues) == 2
-    
-    # Filter by list of strings
-    str_issues = tracker.get_issues(level=["warning", "error"])
-    assert len(str_issues) == 2
-
-def test_debug(tracker):
-    tracker.set_stage("Stage1")
-    tracker.debug("Debug 1", track=True)
-    tracker.debug("Debug 2") # track defaults to False
-    
-    debug_issues = tracker.get_issues(level=ErrorLevel.DEBUG)
-    assert len(debug_issues) == 1
-    assert debug_issues[0].message == "Debug 1"
-
-def test_reset_keep_handlers(tracker, tmp_path):
-    log_file = tmp_path / "test_keep_hndlr.log"
-    tracker.add_file_handler(str(log_file))
-    
-    initial_handler_count = len(tracker.logger.handlers)
-    assert initial_handler_count > 0
-    
-    tracker.reset(keep_handlers=True)
-    
-    assert len(tracker.logger.handlers) == initial_handler_count
-    
-def test_summary_returns_bool(tracker):
-    tracker.set_stage("Stage1")
-    assert tracker.summary() is True
-    
-    tracker.error("Got an error")
-    assert tracker.summary() is False
-
-def test_log_rotation(tmp_path):
-    log_file = tmp_path / "test_rotate.log"
-    log = StageTracker("RotationTestLogger")
-    log.console_enabled = False
-    
-    # max_bytes=100, backup_count=1
-    log.add_file_handler(str(log_file), max_bytes=100, backup_count=1)
-    
-    # Write enough to rotate
-    # Each line is roughly ~50-60 chars depending on format
-    log.set_stage("RotateStage")
-    for i in range(5):
-        log.warning(f"Message {i}" * 5) # Long message
-        
-    # Check if backup file exists
-    backup_file = tmp_path / "test_rotate.log.1"
-    assert backup_file.exists()
-    
-    # Cleanup
-    for h in log.logger.handlers:
-        h.close()
-        log.logger.removeHandler(h)
-
-def test_formatting(tmp_path):
-    log_file = tmp_path / "test_fmt.log"
-    log = StageTracker("FmtTestLogger")
-    log.console_enabled = False
-    log.add_file_handler(str(log_file), level="DEBUG")
-    
-    log.set_stage("FmtStage")
-    
-    log.warning("Warning Message")
-    
-    content = log_file.read_text(encoding='utf-8')
-    assert "Warning Message" in content
-    
-    # Cleanup
-    for h in log.logger.handlers:
-        h.close()
-        log.logger.removeHandler(h)
-
-
+    assert t.summary(raise_errors=True) == True

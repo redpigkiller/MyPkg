@@ -3,81 +3,149 @@
 [![English](https://img.shields.io/badge/Language-English-blue.svg)](stage_tracker.md)
 [![繁體中文](https://img.shields.io/badge/語言-繁體中文-blue.svg)](stage_tracker_zh.md)
 
-專為循序、多階段流程設計的日誌與進度追蹤器。具備執行追蹤、自動累積錯誤、檢查點機制 (checkpointing) 和自動生成總結報告等進階功能。
+`StageTracker` 是一個多階段執行追蹤器，提供系統日誌 (Logging)、問題收集、執行時間記錄與結束時的自動摘要報告。
 
-## 核心特色
+**唯一合法的使用方式是將整個流程包裝在 `with StageTracker() as t:` 中，不支援其他用法。**
 
-- **階段生命週期管理**: 將執行過程清晰劃分為多個階段 (例如："讀取" -> "處理" -> "上傳")。
-- **執行緒安全**: 使用 `threading.local()`，讓每個執行緒擁有獨立的階段歷史和錯誤追蹤紀錄，但仍可共用日誌處理程序 (log handlers)。
-- **累積錯誤處理**: 不像標準 logging 將錯誤訊息散落各處，`StageTracker` 會集中收集它們，允許你提早中斷 (`checkpoint`) 或等待最後統一輸出總結報告。
-- **豐富的報告生成**: 自動整理各階段的錯誤與警告，產生排版乾淨的總結報告區塊輸出到終端機。
-- **延遲求值 (Lazy Evaluation)**: `tracker.info(..., data=my_dict)` 會延後消耗運算資源的 JSON 序列化，直到目標 handler 確定需要輸出時才執行。
+---
 
-## 基本用法
+## 快速入門 (User Guide)
 
-### 扁平模式 (Flat Mode)
+### 1. 扁平模式 (Flat Mode)
+
 最適合由上而下、循序執行的腳本。
+手動呼叫 `begin_stage(name)` 來切換階段，切換新階段時會自動對上一個階段進行結帳 (finalize)。最後一個階段的結帳與報表總結會由 `with` 區塊自然結束時完成。
 
 ```python
 from mypkg.utils.stage_tracker import StageTracker
 
-# 共用實例模式
-tracker = StageTracker("MainTracker")
+with StageTracker("MainTracker", mode="flat") as t:
+    t.begin_stage(" Initialization")
+    t.info("Starting workflow", track=True)
+    t.warning("Debug mode enabled")
 
-# 開始 "Initialization" 階段
-tracker.set_stage("Initialization")
-tracker.info("Starting workflow", track=True)
-tracker.warning("Debug mode enabled")
+    # 隱式結束 "Initialization" 並開啟 "Data Processing"
+    t.begin_stage("Data Processing")
+    t.error("File 'corrupt.txt' is corrupt")  # 紀錄錯誤但不立刻中斷
+    t.error("File 'missing.txt' not found")
 
-# 隱式結束 "Initialization" 階段並開啟 "Data Processing" 階段
-tracker.set_stage("Data Processing")
-tracker.error("File 'corrupt.txt' is corrupt") # 紀錄錯誤但不中斷
-tracker.error("File 'missing.txt' not found")
+    # 因為累積了 error，這裡會立即拋出 StageFailedError
+    t.checkpoint()
 
-# 因為上方有紀錄兩個 error，執行這行將會觸發 StageFailedError
-try:
-    tracker.checkpoint()
-except Exception as e:
-    print(e)
-    
-tracker.summary()
+    t.begin_stage("Export")
+    t.info("Done writing.")
+    # with 結束時自動收尾 "Export" 階段並印出報表
 ```
 
-### 內文管理器模式 (Context Manager Mode)
-適合用在獨立區塊、迴圈、或者較複雜的巢狀邏輯中。
+### 2. 內文管理器模式 (Context Manager Mode)
+
+適合用在獨立區塊、迴圈或者較複雜的巢狀邏輯中。
+使用 `with t.stage(name):` 包住每個階段的邏輯，擁有明確的進入與結束點。**不支援巢狀 stage！**
 
 ```python
 from mypkg.utils.stage_tracker import StageTracker
 
-tracker = StageTracker("ContextTracker")
+with StageTracker("ContextTracker", mode="context") as t:
+    with t.stage("Download"):
+        t.info("Downloading files...")
+        # 離開 with 時會自動跑 health checked. 
+        # 若在區塊中有任何 `t.error()` 呼叫，StageFailedError 將於此拋出。
 
-with tracker.stage("Download"):
-    tracker.info("Downloading files...")
-    # 離開區塊時自動檢查健康狀態。
-    # 若在區塊中有任何 `tracker.error()` 被呼叫，StageFailedError 將於此拋出。
-
-with tracker.stage("Parsing"):
-    tracker.fatal("Out of memory!") # 紀錄嚴重錯誤並立即拋出 StageFailedError
+    with t.stage("Parsing"):
+        t.fatal("Out of memory!") # 紀錄嚴重錯誤並立即拋出 StageFailedError
 ```
 
-*注意事項：請勿在同一個 `StageTracker` 執行上下文中混合使用 Flat Mode 與 Context Manager Mode。*
+> **注意事項**：請勿在同一個 `StageTracker` 實例中混合使用 Flat Mode 與 Context Manager Mode。
 
-## API 參考
+---
 
-### 設定檔 (Configuration)
-* `add_console_handler(level="INFO", fmt="...")`: 新增終端機輸出。（初始化時會自動加入）。若環境有安裝 `rich` 則會啟用更豐富的顏色標示。
-* `add_file_handler(path, level="DEBUG", fmt="...", max_bytes=0, backup_count=0)`: 新增日誌檔案輸出，可選擇加入檔案滾動保留 (log rotation) 的支援。
-* `reset(keep_handlers=False)`: 清空所有累積的錯誤紀錄、階段歷史以及當前階段資訊。適合在同一個執行緒重啟 workflow 之前使用。
+## API 參考 (Detailed Control)
+
+### 建立物件 (Construction)
+
+```python
+StageTracker(
+    name: str = "StageTracker",
+    mode: Literal["flat", "context"] = "flat",
+    plain: bool | None = None,
+    track_time: bool = True,
+)
+```
+
+**平移模式 (`plain`)的自動偵測：**
+若未明確指定 (`plain=None`)，它在以下任一條件成立時會自動關閉 `rich` 顏色優化並轉向純文字報表：環境變數具有 `NO_COLOR`、`TERM` 為 `dumb`/`unknown`、`stdout` 不是 TTY 等。
 
 ### 日誌紀錄 (Logging)
-* `debug(msg, track=False, **kwargs)`: 標準 debug 追蹤器。
-* `info(msg, track=False, **kwargs)`: 標準 info 追蹤器。設為 `track=True` 時會將其放入最後的報告區塊。
-* `warning(msg, track=True, **kwargs)`: 警告追蹤器，預設會被追蹤與計入報告。
-* `error(msg, **kwargs)`: 錯誤追蹤器。會新增一筆 error issue 並累加計數，但該當下「不會」拋出異常。
-* `fatal(msg, **kwargs)`: 紀錄嚴重級別的錯誤，並且「立刻」拋出 `StageFailedError` 異常以中斷程式。
 
-### 方法 (Methods)
-* `set_stage(name)`: 開啟一個新的 flat-mode 階段，並同時檢查前一個階段的健康狀態是否有 error 發生。
-* `checkpoint()`: 如果目前階段累積了任何 error 層級以上的紀錄，則拋出 `StageFailedError`。
-* `summary(title="EXECUTION SUMMARY") -> bool`: 印出總結報告。若在此之前沒有任何錯誤發生則回傳 `True`，否則為 `False`。
-* `get_issues(stage=None, level=None)`: 回傳符合條件的 `Issue` dataclasses 列表。層級條件可傳入單一個 `ErrorLevel` 或是其列表。
+所有的 Log 方法底部都是呼叫標準 Python `logging` 模組，並支援將紀錄存入 issue 清單供報表追蹤。
+
+| 方法 | Level | 預設 `track` | 說明 |
+| --- | --- | --- | --- |
+| `t.debug(msg)` | DEBUG | `False` | 偵錯訊息，預設不追蹤 |
+| `t.info(msg)` | INFO | `False` | 一般資訊，預設不追蹤 |
+| `t.warning(msg)` | WARNING | `True` | 警告，預設追蹤但不阻斷流程 |
+| `t.error(msg)` | ERROR | `True` (強制) | 錯誤，追蹤並在 stage 結束時阻斷流程 |
+| `t.fatal(msg)` | CRITICAL | `True` (強制) | 致命錯誤，立即拋出 `StageFailedError` |
+
+*(註：可傳入 `track=True` 將 INFO 或 DEBUG 記錄加進最終報表裡展示)*
+
+### 階段管理方法
+
+| 方法 | 說明 |
+| --- | --- |
+| `begin_stage(name)` | Flat Mode 專用。開啟一個新階段，並自動檢查前一個階段的健康狀態。 |
+| `stage(name)` | Context Mode 專用。作為 Context Manager 開啟一個新階段。 |
+| `checkpoint()` | 主動檢查當前階段的健康狀態。如果當前階段存在任何 ERROR/CRITICAL issue，會提早拋出 `StageFailedError`。 |
+
+### 設定與擴充 (Configuration)
+
+| 方法 | 說明 |
+| --- | --- |
+| `add_console_handler(level="INFO")` | 新增主控台輸出 (預設初始化時已加入)。若重複呼叫將不會產生疊加。 |
+| `add_file_handler(path, level="DEBUG", max_bytes=0, backup_count=0)` | 新增檔案日誌輸出，可設定 `max_bytes` 與 `backup_count` 以啟用 Log 輪轉紀錄 (Rotating)。 |
+
+### Issue 查詢管理
+
+| 方法 | 說明 |
+| --- | --- |
+| `get_issues(stage=None, level=None)` | 進行多條件過濾搜尋並回傳符合的 `Issue` dataclasses。 |
+| `clear_issues()` | 清空紀錄資料板 (不建議於一般使用情境下呼叫)。 |
+
+---
+
+## 行為與設計細節
+
+### 例外處理行為與總結報表
+
+`StageTracker` 會在退出 `with` 區塊時結帳並輸出 `summary()` 報表：
+
+- **正常結束 (無例外)：** 將收尾最後一階段狀態，印出 `EXECUTION SUMMARY`；如果發現階段曾收到錯誤訊號，在此時會對外拋出 `StageFailedError`。
+- **異常結束 (包含 `fatal`)：** 任何異常都會導致印出 `EXECUTION FAILED (例外類型)`，然後原始的異常物件會依原封不動地向外拋出。
+
+**報表輸出範例：**
+```text
+============================================================
+                     EXECUTION SUMMARY                      
+============================================================
+Execution Paths by Thread:
+  MainThread: Initialization → Data Processing → Export
+------------------------------------------------------------
+[ WARNING] Data Processing | File 'corrupt.txt' is corrupt (1.20s)
+[  ERROR ] Data Processing | File 'missing.txt' not found (0.01s)
+------------------------------------------------------------
+FAILED: 1 critical/errors found.
+============================================================
+```
+
+### `StageFailedError`
+
+當階段結帳時認定有累積的錯誤等級記錄即拋出 `StageFailedError`。包含：
+- `e.stage`: 造成失敗的模塊階段名稱。
+- `e.error_count`: 計算阻斷流程的錯誤數。
+- `e.issues`: 保留了對應問題的清單陣列，方便除錯。
+
+### 多執行緒安全 (Thread Safety)
+
+- `_issues` 清單狀態具備鎖定 (Lock) 保護，多執行緒同時 Log 不會出現衝突。
+- 為了讓多條執行緒具備彼此獨立的執行流，`current_stage` 被實作為 `threading.local`。各執行緒會自己推進與處理自己的階段。
+- 各執行的時間紀錄未加入鎖，設計上預設每條執行緒跑自己的自訂階段名（因此已做了名稱差異處理）。

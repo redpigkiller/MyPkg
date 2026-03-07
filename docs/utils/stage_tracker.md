@@ -1,83 +1,149 @@
-# StageTracker
+# StageTracker — Multi-Stage Workflow Logging
 
 [![English](https://img.shields.io/badge/Language-English-blue.svg)](stage_tracker.md)
 [![繁體中文](https://img.shields.io/badge/語言-繁體中文-blue.svg)](stage_tracker_zh.md)
 
-A workflow-oriented logger for sequential, multi-stage processes. Designed to handle execution tracking, accumulated error handling, checkpointing, and auto-generated summaries.
+`StageTracker` is a multi-stage execution tracker that provides logging, issue collection, execution time tracking, and a summary report upon completion.
 
-## Key Features
+**The only valid usage is wrapping the entire workflow using `with StageTracker() as t:`.** Other usage patterns are not supported.
 
-- **Stage Lifecycle Management**: Neatly separates execution into stages (e.g. "Load" -> "Process" -> "Upload").
-- **Thread-Safe**: Uses `threading.local()` so each thread maintains its own stage history and issue tracking, while sharing log handlers.
-- **Accumulated Error Handling**: Unlike standard logging where errors are scattered, `StageTracker` collects them and allows you to fail early (`checkpoint`) or wait until the summary.
-- **Rich Summary Generation**: Auto-generates a clean summary console block displaying total errors and warnings organized by stage.
-- **Lazy Evaluation**: `tracker.info(..., data=my_dict)` delays expensive JSON serialization until truly needed by the handler.
+---
 
-## Basic Usage
+## Quick Start (User Guide)
 
-### Flat Mode
-Best for top-down, sequential scripts.
+### 1. Flat Mode
+
+Best for top-down, sequential scripts. Manually call `begin_stage(name)` to switch stages. Calling `begin_stage` automatically finalizes the previous stage. The final stage is finalized and reported automatically when exiting the `with` block.
 
 ```python
 from mypkg.utils.stage_tracker import StageTracker
 
-# Shared instance pattern
-tracker = StageTracker("MainTracker")
+with StageTracker("MainTracker", mode="flat") as t:
+    t.begin_stage("Initialization")
+    t.info("Starting workflow", track=True)
+    t.warning("Debug mode enabled")
 
-# Starts "Initialization" stage
-tracker.set_stage("Initialization")
-tracker.info("Starting workflow", track=True)
-tracker.warning("Debug mode enabled")
+    # Implicitly finalizes "Initialization" and starts "Data Processing"
+    t.begin_stage("Data Processing")
+    t.error("File 'corrupt.txt' is corrupt") # Accumulates issue
+    t.error("File 'missing.txt' not found")
 
-# Implicitly finalizes "Initialization" and starts "Processing"
-tracker.set_stage("Data Processing")
-tracker.error("File 'corrupt.txt' is corrupt") # Accumulates issue
-tracker.error("File 'missing.txt' not found")
+    # Will raise StageFailedError immediately if there are accumulated errors
+    t.checkpoint()
 
-# Will raise StageFailedError because of the two errors above
-try:
-    tracker.checkpoint()
-except Exception as e:
-    print(e)
-    
-tracker.summary()
+    t.begin_stage("Export")
+    t.info("Done writing.")
+    # Exiting `with` automatically finalizes "Export" and prints summary
 ```
 
-### Context Manager Mode
-Best for isolated blocks, loops, or complex nested logic.
+### 2. Context Manager Mode
+
+Best for isolated blocks, loops, or complex nested logic. Use `with t.stage(name):` to wrap each stage. **Nested stages are not supported.**
 
 ```python
 from mypkg.utils.stage_tracker import StageTracker
 
-tracker = StageTracker("ContextTracker")
+with StageTracker("ContextTracker", mode="context") as t:
+    with t.stage("Download"):
+        t.info("Downloading files...")
+        # Health checked automatically upon exit. 
+        # If any `t.error()` was called, StageFailedError is raised here.
 
-with tracker.stage("Download"):
-    tracker.info("Downloading files...")
-    # Health checked automatically upon exit. 
-    # If any `tracker.error()` was called, StageFailedError is raised here.
-
-with tracker.stage("Parsing"):
-    tracker.fatal("Out of memory!") # Raises StageFailedError immediately
+    with t.stage("Parsing"):
+        t.fatal("Out of memory!") # Raises StageFailedError immediately
 ```
 
-*Note: You cannot mix Flat Mode and Context Manager Mode loops within the same `StageTracker` execution context.*
+> **Note**: You cannot mix Flat Mode and Context Manager Mode loops within the same `StageTracker` instance.
 
-## API Reference
+---
 
-### Configuration
-* `add_console_handler(level="INFO", fmt="...")`: Adds a console output. (Added automatically on init). Uses `rich` if installed.
-* `add_file_handler(path, level="DEBUG", fmt="...", max_bytes=0, backup_count=0)`: Adds a log file, with optional log rotation.
-* `reset(keep_handlers=False)`: Clears all accumulated issues, stage history, and the current stage. Useful before restarting a workflow in the same thread.
+## API Reference (Detailed Control)
+
+### Construction
+
+```python
+StageTracker(
+    name: str = "StageTracker",
+    mode: Literal["flat", "context"] = "flat",
+    plain: bool | None = None,
+    track_time: bool = True,
+)
+```
+
+**Auto-detecting `plain`:**
+If `plain=None`, it automatically falls back to plain text (no Rich colors) if `NO_COLOR` is set, `TERM` is dumb/unknown, standard output is not a TTY, or the `rich` package is not installed.
 
 ### Logging
-* `debug(msg, track=False, **kwargs)`: Standard debug tracker.
-* `info(msg, track=False, **kwargs)`: Standard info tracker. Set `track=True` to include in the ending summary block.
-* `warning(msg, track=True, **kwargs)`: Warning log, tracked in summary by default.
-* `error(msg, **kwargs)`: Error tracker. Adds an error issue. Does not raise immediately.
-* `fatal(msg, **kwargs)`: Logs a critical error and raises `StageFailedError` immediately.
 
-### Methods
-* `set_stage(name)`: Starts a new flat-mode stage. Checks the health of the previous stage.
-* `checkpoint()`: Raises `StageFailedError` if the current stage has accumulated any errors.
-* `summary(title="EXECUTION SUMMARY") -> bool`: Prints the summary. Returns `True` if no errors were found, `False` otherwise.
-* `get_issues(stage=None, level=None)`: Returns a list of `Issue` dataclasses matching the criteria. Level can be a single `ErrorLevel` or a list of levels.
+All logging methods route through the standard Python `logging` module and conditionally add the message to the issue tracker.
+
+| Method | Level | Default `track` | Description |
+| --- | --- | --- | --- |
+| `t.debug(msg)` | DEBUG | `False` | Debug message, untracked by default. |
+| `t.info(msg)` | INFO | `False` | General info, untracked by default. |
+| `t.warning(msg)` | WARNING | `True` | Warning, tracked in summary but doesn't block execution. |
+| `t.error(msg)` | ERROR | `True` (forced) | Error, tracked and blocks execution at the end of the stage. |
+| `t.fatal(msg)` | CRITICAL | `True` (forced) | Critical error, immediately raises `StageFailedError`. |
+
+*(Note: Passing `track=True` adds any info or debug log to the final issue summary report.)*
+
+### Stage Management Methods
+
+| Method | Description |
+| --- | --- |
+| `begin_stage(name)` | Starts a new flat-mode stage. Triggers health check on the previous stage. |
+| `stage(name)` | Context manager to execute a code block as a distinct stage (Context mode only). |
+| `checkpoint()` | Proactively checks the current stage health. Raises `StageFailedError` if any ERROR/CRITICAL issues have accumulated. |
+
+### Configuration
+
+| Method | Description |
+| --- | --- |
+| `add_console_handler(level="INFO")` | Adds a console output (auto-added on init). Prevents duplicates. |
+| `add_file_handler(path, level="DEBUG", max_bytes=0, backup_count=0)` | Adds file logging, with optional log rotation. |
+
+### Issue Management
+
+| Method | Description |
+| --- | --- |
+| `get_issues(stage=None, level=None)` | Returns a list of `Issue` dataclasses matching the stage and/or level filters. |
+| `clear_issues()` | Clears all tracked data, history, and current stage. (Not recommended for standard workflows). |
+
+---
+
+## Behavior Details
+
+### Exception Handling & Summaries
+
+The tracker automatically triggers a summary report when the `with` block exits:
+
+- **Normal Exit:** Finalizes the current stage, prints `EXECUTION SUMMARY`, and raises `StageFailedError` if the last stage had errors.
+- **Exception Exit:** If any exception occurred (including `fatal`), it prints `EXECUTION FAILED (ExceptionType)` and re-raises the exception.
+
+**Example Summary Output:**
+```text
+============================================================
+                     EXECUTION SUMMARY                      
+============================================================
+Execution Paths by Thread:
+  MainThread: Initialization → Data Processing → Export
+------------------------------------------------------------
+[ WARNING] Data Processing | File 'corrupt.txt' is corrupt (1.20s)
+[  ERROR ] Data Processing | File 'missing.txt' not found (0.01s)
+------------------------------------------------------------
+FAILED: 1 critical/errors found.
+============================================================
+```
+
+### `StageFailedError`
+
+Raised whenever a stage evaluates with an `ERROR` or `CRITICAL` issue, storing:
+- `e.stage`: The failed stage's name.
+- `e.error_count`: The number of blocking errors.
+- `e.issues`: The full issue list for debugging.
+
+### Thread Safety
+
+- `_issues` and related resources are protected by locks; logging from multiple threads is safe.
+- `current_stage` relies on Python's `threading.local()`, so each thread independently manages its current stage natively.
+- Stage times and starts do not use locks during updates, expecting each thread to manage isolated stages logically.
