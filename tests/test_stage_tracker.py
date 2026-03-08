@@ -151,6 +151,7 @@ def test_issue_querying():
     # We should catch it, but `t.error("e2")` will go to "System" or None.
     # Let's bypass health check logic by not entering B with begin_stage, or just clear issues.
     
+    t.current_stage = None
     t.clear_issues()
     t.begin_stage("A")
     t.debug("d1", track=True)
@@ -178,6 +179,7 @@ def test_issue_querying():
     # get by stage and level
     assert len(t.get_issues(stage="A", level="error")) == 1
     
+    t.current_stage = None
     t.clear_issues()
 
 # ---------------------------------------------------------------------------

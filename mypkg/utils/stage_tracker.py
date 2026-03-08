@@ -113,6 +113,15 @@ class StageTracker:
         plain: bool | None = None,
         track_time: bool = True,
     ):
+        """
+        Initialize a new StageTracker.
+
+        Args:
+            name: The base name for this tracker (used in logging).
+            mode: Operating mode. 'flat' uses begin_stage(), 'context' uses stage() context manager.
+            plain: If True, disable Rich formatting. If None, auto-detects based on terminal capabilities.
+            track_time: If True, record execution duration for each stage.
+        """
         if mode not in ("flat", "context"):
             raise ValueError("mode must be 'flat' or 'context'")
 
@@ -207,7 +216,20 @@ class StageTracker:
 
     # flat mode
     def begin_stage(self, name: str) -> None:
-        """Begin a new stage in flat mode."""
+        """
+        Begin a new stage in flat mode.
+
+        This method automatically finalizes the previous stage. If the previous stage
+        had any accumulated errors (ERROR or CRITICAL), this method will raise
+        a StageFailedError immediately before starting the new stage.
+
+        Args:
+            name: The name of the new stage.
+
+        Raises:
+            UsageError: If NOT in 'flat' mode or if the stage name already exists.
+            StageFailedError: If the PREVIOUS stage had errors.
+        """
         self._check_entered()
         name = self._make_stage_name(name)
 
@@ -231,7 +253,19 @@ class StageTracker:
     # context mode
     @contextmanager
     def stage(self, name: str):
-        """Context manager for entering a stage."""
+        """
+        Context manager for entering a stage. Context mode only.
+
+        Stage health is checked automatically upon exiting the context. If any errors
+        occurred within the stage, StageFailedError is raised.
+
+        Args:
+            name: The name of the stage.
+
+        Raises:
+            UsageError: If NOT in 'context' mode, or if nested stages are attempted.
+            StageFailedError: If the stage concludes with errors.
+        """
         self._check_entered()
         name = self._make_stage_name(name)
 
@@ -274,7 +308,12 @@ class StageTracker:
     # ------------------------------------------------
 
     def checkpoint(self) -> None:
-        """Stop execution if the current stage has accumulated any errors."""
+        """
+        Proactively check the health of the current stage.
+
+        Raises:
+            StageFailedError: If the current stage has accumulated any errors.
+        """
         self._check_entered()
         stage = self.current_stage
         if stage:
@@ -312,6 +351,16 @@ class StageTracker:
         self._log(ErrorLevel.ERROR, msg, True, **kw)
 
     def fatal(self, msg, **kw):
+        """
+        Log a critical error and raise StageFailedError immediately.
+
+        Args:
+            msg: The error message.
+            **kw: Additional arguments passed to the logger.
+
+        Raises:
+            StageFailedError: Always raised after recording the fatal issue.
+        """
         self._log(ErrorLevel.CRITICAL, msg, True, **kw)
 
         stage = self.current_stage or "System"
@@ -411,8 +460,16 @@ class StageTracker:
         return issues
     
     def clear_issues(self):
-        """Clear all tracking data and reset state."""
+        """
+        Clear all tracking data, history, and reset internal state.
+
+        Warning: This resets everything except the log handlers and entry status.
+        Cannot be called while a stage is currently active.
+        """
         self._check_entered()
+        if self.current_stage is not None:
+            raise UsageError("Cannot clear issues while a stage is active.")
+            
         with self._issues_lock:
             self._issues.clear()
             self._stage_order.clear()
@@ -424,7 +481,22 @@ class StageTracker:
     # ------------------------------------------------
 
     def summary(self, title: str = "EXECUTION SUMMARY", raise_errors: bool = True) -> bool:
-        """Generate an execution summary report."""
+        """
+        Generate and print an execution summary report.
+
+        In 'flat' mode, if there is an active stage, it will be finalized first.
+
+        Args:
+            title: Title of the summary panel/table.
+            raise_errors: If True and the workflow had errors, raises StageFailedError
+                         after printing the report.
+
+        Returns:
+            bool: True if the workflow completed without any errors.
+
+        Raises:
+            StageFailedError: If raise_errors is True and errors exist.
+        """
 
         deferred_exc = None
         if self._mode == TrackerMode.FLAT and self.current_stage:
@@ -538,6 +610,7 @@ class StageTracker:
                         self._stage_time[stage] = (
                             time.perf_counter() - self._stage_start[stage]
                         )
+                self.current_stage = None
 
             self.summary(
                 title=f"EXECUTION FAILED ({exc_type.__name__})", raise_errors=False
