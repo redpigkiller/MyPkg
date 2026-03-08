@@ -106,3 +106,9 @@ def test_diff_lines_uneven_replace():
     # Should not use character level annotation
     assert "~" not in report
     assert "^" not in report
+
+def test_diff_lines_type_error_on_string():
+    with pytest.raises(TypeError) as excinfo:
+        diff_lines("hello", "world")
+    
+    assert "diff_lines expects lists of strings" in str(excinfo.value)

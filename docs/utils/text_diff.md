@@ -88,11 +88,11 @@ print(report)
 
 You can customize the layout and behavior of the diff engine by passing these parameters to either function:
 
-- **`col_width`** (`int`, default: `40`): The visual character width allocated for each column (left and right).
+- **`col_width`** (`int`, default: `40`): The visual character width allocated for **each individual column** (left and right). The total report width will be wider (`num_width*2 + col_width*2 + 9`).
 - **`num_width`** (`int`, default: `4`): The minimum character width allocated for line numbers. It dynamically expands if the file length requires more digits.
 - **`fold_threshold`** (`int`, default: `6`): The minimum number of consecutive identical lines required to trigger smart folding.
 - **`context_lines`** (`int`, default: `1`): The number of surrounding identical lines to keep visible above and below a folded block.
-- **`wrap_mode`** (`bool`, default: `True`): If `True`, long lines exceeding `col_width` are smartly wrapped to the next line. If `False`, they are aggressively truncated with `...`.
+- **`wrap_mode`** (`bool`, default: `True`): If `True`, long lines exceeding `col_width` are smartly wrapped to the next line. If `False`, they are aggressively and irreversibly truncated with `...` (useful for keeping logs strictly 1:1, but content integrity is lost).
 
 ### Architectural Specifics
 
