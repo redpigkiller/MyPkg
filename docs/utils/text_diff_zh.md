@@ -82,7 +82,7 @@ print(report)
 | API 函式 | 說明 |
 | --- | --- |
 | `diff_files(file1_path, file2_path, output_path=None, **kwargs)` | 讀取兩個檔案，產生對齊的 Diff 報告字串。若有提供 `output_path` 則會同步寫入檔案，並回傳該字串。 |
-| `generate_diff_report(lines1, lines2, **kwargs)` | 傳入兩個字串 List 作為左右內容，計算並構造完整的左右並排報告字串。 |
+| `diff_lines(lines1, lines2, **kwargs)` | 傳入兩個字串 List 作為左右內容，計算並構造完整的左右並排報告字串。 |
 
 ### 排版設定參數 (`**kwargs`)
 
@@ -93,6 +93,8 @@ print(report)
 - **`fold_threshold`** (`int`, 預設值: `6`): 觸發「智慧摺疊」所需要的連續相同行數最低門檻。
 - **`context_lines`** (`int`, 預設值: `1`): 在摺疊區塊的上下，要保留多少行「上下文」不被摺疊。
 - **`wrap_mode`** (`bool`, 預設值: `True`): 開啟時，超過 `col_width` 的長句子會被聰明地自動換行至佈局下方。如果設為 `False`，過長的句子會被無情截斷並以 `...` 結尾 (截斷為不可逆操作，若內容完整性重要請保持預設 `True`)。
+- **`show_hints`** (`bool`, 預設值: `True`): 開啟時，會在修改過的地方下方，精準標示出字元級別的增加與刪除提示 (`^` 與 `~`)。
+- **`diff_style`** (`str`, 預設值: `"side_by_side"`): 控制差異報告的排版格式。可設定為 `"side_by_side"` (預設的左右雙欄模式) 或 `"unified"` (一般標準的單欄模式)。
 
 ### 架構與設計細節
 

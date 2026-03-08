@@ -1,4 +1,5 @@
 import pytest
+import os
 from mypkg.utils.text_diff import (
     get_char_width,
     get_visual_width,
@@ -8,8 +9,25 @@ from mypkg.utils.text_diff import (
     visual_wrap,
     format_line,
     get_dmp_annotations,
-    diff_lines
+    diff_lines,
+    diff_files
 )
+
+def test_diff_files(tmp_path):
+    f1 = tmp_path / "file1.txt"
+    f2 = tmp_path / "file2.txt"
+    out = tmp_path / "diff.txt"
+    
+    f1.write_text("Line 1\nLine 2", encoding="utf-8")
+    f2.write_text("Line 1\nLine 2 mod", encoding="utf-8")
+    
+    report = diff_files(str(f1), str(f2), output_path=str(out))
+    
+    assert "Line 1" in report
+    assert "Line 2" in report
+    assert os.path.exists(str(out))
+    with open(out, "r", encoding="utf-8") as f:
+        assert f.read().strip() == report.strip()
 
 def test_character_width():
     assert get_char_width("A") == 1
@@ -112,3 +130,37 @@ def test_diff_lines_type_error_on_string():
         diff_lines("hello", "world")
     
     assert "diff_lines expects lists of strings" in str(excinfo.value)
+
+def test_diff_lines_show_hints_off():
+    lines1 = ["def compute(a):"]
+    lines2 = ["def compute(x):"]
+    # With show_hints=False, there should be no ~ or ^ in the output
+    report = diff_lines(lines1, lines2, show_hints=False)
+    assert "~" not in report
+    assert "^" not in report
+
+def test_diff_lines_unified_style():
+    lines1 = ["Line 1", "Line 2 (old)", "Line 3"]
+    lines2 = ["Line 1", "Line 2 (new)", "Line 3"]
+    report = diff_lines(lines1, lines2, diff_style="unified")
+    
+    # Unified style should contain - for old and + for new in separate lines
+    assert "-" in report
+    assert "+" in report
+    # Should contain the line indicators
+    assert "Line 2 (old)" in report
+    assert "Line 2 (new)" in report
+    # Characters hints should still be there if show_hints is True (default)
+    assert "^" in report
+    assert "~" in report
+
+def test_diff_lines_unified_no_hints():
+    lines1 = ["Line 1", "Line 2 (old)"]
+    lines2 = ["Line 1", "Line 2 (new)"]
+    report = diff_lines(lines1, lines2, diff_style="unified", show_hints=False)
+    
+    assert "-" in report
+    assert "+" in report
+    # Should not have character hints
+    assert "^" not in report
+    assert "~" not in report

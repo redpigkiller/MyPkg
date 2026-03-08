@@ -104,6 +104,17 @@ with tracker.stage("Process"): # Context Mode (自動資源管理)
 tracker.summary()                    # 自動印出失敗報告
 ```
 
+### [Text-Diff](docs/utils/text_diff_zh.md) — 純文字差異比對報告器
+
+支援左右並排 (Side-by-Side) 或單欄 (Unified) 模式的終端機文字比對工具，提供精準到字元級別的標示與智慧換行功能。
+
+```python
+from mypkg.utils.text_diff import diff_lines
+
+report = diff_lines(["舊代碼"], ["新代碼"], diff_style="side_by_side")
+print(report)
+```
+
 ---
 
 ## Excel 自動化

@@ -97,6 +97,17 @@ with tracker.stage("Process"): # Context Mode (Auto resource management)
 tracker.summary()                    # Auto-prints failure report
 ```
 
+### [Text-Diff](docs/utils/text_diff.md) — Plain Text Difference Reporter
+
+A terminal-friendly text comparison utility supporting side-by-side or unified diffs with character-level precision and smart line wrapping.
+
+```python
+from mypkg.utils.text_diff import diff_lines
+
+report = diff_lines(["old line"], ["new line"], diff_style="side_by_side")
+print(report)
+```
+
 ---
 
 ## Excel Automation

@@ -93,6 +93,8 @@ You can customize the layout and behavior of the diff engine by passing these pa
 - **`fold_threshold`** (`int`, default: `6`): The minimum number of consecutive identical lines required to trigger smart folding.
 - **`context_lines`** (`int`, default: `1`): The number of surrounding identical lines to keep visible above and below a folded block.
 - **`wrap_mode`** (`bool`, default: `True`): If `True`, long lines exceeding `col_width` are smartly wrapped to the next line. If `False`, they are aggressively and irreversibly truncated with `...` (useful for keeping logs strictly 1:1, but content integrity is lost).
+- **`show_hints`** (`bool`, default: `True`): If `True`, enables precise character-level insertion/deletion indicators (`^` and `~`) underneath modified lines.
+- **`diff_style`** (`str`, default: `"side_by_side"`): The layout format of the diff report. Can be either `"side_by_side"` for the dual-pane column view, or `"unified"` for a standard single-pane layout.
 
 ### Architectural Specifics
 
